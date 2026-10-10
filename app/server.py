@@ -468,6 +468,60 @@ async def list_clips(limit: int = Query(100, ge=1, le=1000)):
     return await run_in_threadpool(rt.clips.list, limit)
 
 
+# ---------------------------------------------------------------- loss-prevention case export
+
+@app.get("/api/cases/export.zip")
+async def export_case(hours: float = Query(24, gt=0, le=24 * 31), types: str | None = None, camera: str | None = None):
+    """One zip for an incident: the alerts of the period as CSV plus every evidence clip that belongs to them."""
+    import csv, io, zipfile
+    want = {t.strip() for t in types.split(",")} if types else None
+    rows = await run_in_threadpool(rt.store.alerts, time.time() - hours * 3600, False, 5000)
+    rows = [a for a in rows if (not want or a["type"] in want) and (not camera or a["camera_id"] == camera)]
+    names = {c.id: c.name for c in rt.config_store.config.cameras}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["id", "started", "resolved", "type", "camera", "zone", "track_id", "message", "clip"])
+        for a in rows:
+            w.writerow([a["id"], datetime.fromtimestamp(a["started"]).isoformat(timespec="seconds"),
+                        datetime.fromtimestamp(a["resolved"]).isoformat(timespec="seconds") if a.get("resolved") else "",
+                        a["type"], names.get(a["camera_id"], a["camera_id"] or ""), a.get("zone") or "", a.get("track_id") or "",
+                        a["message"], a.get("clip") or ""])
+            clip = a.get("clip")
+            if clip and (DATA_DIR / "clips" / clip).is_file():
+                z.write(DATA_DIR / "clips" / clip, f"clips/{clip}")
+        z.writestr("alerts.csv", out.getvalue())
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="case_{int(time.time())}.zip"'})
+
+
+# ---------------------------------------------------------------- staffing (shopper-to-associate ratio)
+
+@app.get("/api/staffing")
+async def staffing(days: int = Query(7, ge=1, le=60), target_ratio: float = Query(4.0, gt=0)):
+    """Per hour of day over the last N days: average customers, average staff on the floor, customers per staff
+    (STAR) and the staff needed to hold target_ratio customers per staff."""
+    import math
+    rows = await run_in_threadpool(rt.store.minutes_since, time.time() - days * 86400)
+    acc: dict[int, list] = {}
+    for r in rows:
+        h = datetime.fromtimestamp(r["ts"]).hour
+        a = acc.setdefault(h, [0.0, 0.0, 0])
+        a[0] += r["avg_occ"] or 0.0
+        a[1] += r["staff_avg"] or 0.0
+        a[2] += 1
+    out = []
+    for h in sorted(acc):
+        cust, staff, n = acc[h][0] / acc[h][2], acc[h][1] / acc[h][2], acc[h][2]
+        need = math.ceil(cust / target_ratio) if cust > 0.2 else 0
+        out.append({"hour": h, "avg_customers": round(cust, 2), "avg_staff": round(staff, 2),
+                    "customers_per_staff": round(cust / staff, 2) if staff > 0.05 else None,
+                    "recommended_staff": need, "gap": round(need - staff, 1), "minutes": n})
+    return {"days": days, "target_ratio": target_ratio, "hours": out,
+            "understaffed_hours": [o["hour"] for o in out if o["gap"] >= 1], "overstaffed_hours": [o["hour"] for o in out if o["gap"] <= -1]}
+
+
 # ---------------------------------------------------------------- counting accuracy audits
 
 class AuditIn(BaseModel):
