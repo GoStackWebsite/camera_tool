@@ -266,6 +266,7 @@
       <form class="form" id="fStaff">
         <label>Treat anyone present longer than (minutes) as staff, 0 = off<input name="after_minutes" type="number" min="0" step="5"></label>
       </form>
+      <div class="mt"><b style="font-size:13px">Learned uniform model</b><div id="staffModelHint" class="hint mt">Not installed: the colour rules below are used. Train one from labelled captures with <code>tools\staff_train.py</code> (or the MCP tool <code>train_staff_model</code>); the file <code>models\staff_cls.pt</code> can be copied to every store of the chain.</div></div>
       <div class="mt"><b style="font-size:13px">Uniform colours</b><div id="uniformList" class="mt"></div></div>
       <div class="toolbar"><button class="primary" data-save="staff">Save staff settings</button><span class="hint">Staff are recognised by a staff zone (draw one behind the counter), by uniform colour (open a camera and press "Staff" on a person wearing the uniform), or by long presence. Staff are excluded from footfall and enable the unattended-customer and phone checks.</span></div></div>
     <div class="card mt"><h2>Demographics (anonymous age band &amp; gender)</h2>
@@ -619,6 +620,7 @@
   function renderDemographics(d) {
     const total = d.with_demographics;
     barList($('#ageBars'), d.bands.map(b => ({label: b.band, value: b.count})), v => total ? `${v} · ${(v / total * 100).toFixed(0)}%` : v);
+    if (S && S.staff_model && S.staff_model.loaded) $('#staffModelHint').textContent = `Installed: ${S.staff_model.file} (trained ${new Date(S.staff_model.trained * 1000).toLocaleString()}, ${S.staff_model.samples} samples this session). It decides who is staff; the colour rules below are only a fallback.`;
     $('#demoHint').textContent = total ? `Faces seen for ${d.with_demographics} of ${d.total_visits} visits (${d.coverage_pct}%).` : (S && S.demographics && !S.demographics.available ? 'Face models not loaded: check the server log.' : 'No faces seen yet. Demographics need a camera that sees faces, ideally at the entrance.');
     const g = d.gender; const tiles = $('#genderTiles'); tiles.innerHTML = '';
     [['Men', total ? g.male_pct + '%' : '–'], ['Women', total ? g.female_pct + '%' : '–'], ['Average age', d.avg_age ?? '–']].forEach(([l, v]) => { const t = document.createElement('div'); t.className = 'tile'; text(t, 'div', l, 'label'); text(t, 'div', v, 'value'); tiles.appendChild(t); });
@@ -684,7 +686,7 @@
     [[has('queue'), `Queue breach: > ${thr.queue_max - 1} people in a queue zone for ${thr.queue_seconds}s`, 'draw a zone with role "queue"'],
      [staffOn && (has('display') || has('checkout')), `Unattended customer: ${thr.unattended_seconds}s in a display/checkout zone with no staff nearby`, 'set up staff detection plus display/checkout zones'],
      [staffOn || thr.phone_everyone, `Phone usage: ${thr.phone_seconds}s holding a phone (${thr.phone_everyone ? 'everyone' : 'staff'})`, 'set up staff detection or enable "phone alerts for customers too"'],
-     [staffOn, `Staff detection: ${[has('staff') ? 'staff zone' : '', (CFG.staff.uniforms || []).length ? 'uniform colour' : '', CFG.staff.after_minutes > 0 ? `present > ${CFG.staff.after_minutes} min` : ''].filter(Boolean).join(', ') || 'off'}`, 'draw a staff zone, learn a uniform, or set the long-presence minutes'],
+     [staffOn, `Staff detection: ${[S && S.staff_model && S.staff_model.loaded ? 'learned uniform model' : '', has('staff') ? 'staff zone' : '', (CFG.staff.uniforms || []).length ? (S && S.staff_model && S.staff_model.loaded ? 'uniform colour (fallback)' : 'uniform colour') : '', CFG.staff.after_minutes > 0 ? `present > ${CFG.staff.after_minutes} min` : ''].filter(Boolean).join(', ') || 'off'}`, 'draw a staff zone, learn a uniform, or set the long-presence minutes'],
      [true, `Crowd: ≥ ${thr.crowd_threshold} customers on one camera`, ''], [true, `Lingering: a visitor present ≥ ${fmtDur(thr.loiter_seconds)}`, ''],
      [true, 'Camera offline > 1 min', ''], [true, `Store open/close vs ${CFG.store.open_time}–${CFG.store.close_time} (+${CFG.store.grace_minutes} min grace)`, '']]
       .forEach(([on, label, fix]) => { const row = document.createElement('div'); row.className = 'ev'; row.style.gridTemplateColumns = 'auto 1fr'; text(row, 'span', on ? 'ON' : 'OFF', 'chip ' + (on ? 'good' : '')); text(row, 'span', label + (on || !fix ? '' : ` — ${fix}`)); rules.appendChild(row); });

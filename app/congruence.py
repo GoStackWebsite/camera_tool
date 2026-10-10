@@ -18,6 +18,7 @@ after the server accepted it, so an outage of the server or the network loses no
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -185,6 +186,8 @@ class CongruenceConnector:
         self.last_error = ""
         self.last_ok = 0.0
         self.sent = {k: 0 for k in KINDS} | {"snapshot": 0, "heartbeat": 0}
+        self.rejected = {k: 0 for k in KINDS}       # rows the server accepted the batch for but dropped (stale ts, unknown zone...)
+        self.last_reject = ""
 
     # ---- lifecycle --------------------------------------------------------
     @property
@@ -290,6 +293,9 @@ class CongruenceConnector:
                 d["zoneId"] = zid
             if rule in self._rules:
                 d["ruleId"] = self._rules[rule]
+            jpeg = self._evidence_jpeg(camera_id)
+            if jpeg:
+                d["_jpeg_b64"] = base64.b64encode(jpeg).decode()    # uploaded as the detection's evidence snapshot on flush
             self.spool.put("detections", d)
 
         def storeops(kind: str) -> None:
@@ -341,7 +347,7 @@ class CongruenceConnector:
         return {
             "enabled": c.enabled, "configured": self.configured(), "base_url": c.base_url,
             "online": self.online, "last_error": self.last_error, "last_ok": self.last_ok,
-            "backlog": backlog, "dead": dead, "sent": dict(self.sent),
+            "backlog": backlog, "dead": dead, "sent": dict(self.sent), "rejected": dict(self.rejected), "last_reject": self.last_reject,
             "store": st.get("name"), "mapped_cameras": sum(1 for v in c.cameras.values() if v),
             "mapped_zones": sum(1 for v in c.zones.values() if v),
             "managed": bool(c.managed), "remote_fetched_at": self.remote_fetched_at, "remote_cached_at": self.remote_cached_at,
@@ -487,6 +493,55 @@ class CongruenceConnector:
             self.accept_config(data)
             log.info("Congruence Eye: connected to store '%s'", (data.get("store") or {}).get("name"))
 
+    def _evidence_jpeg(self, camera_id: str | None) -> bytes | None:
+        """Annotated frame of the camera at alert time (16:9 letterboxed like the periodic snapshots)."""
+        if not camera_id or self.manager is None:
+            return None
+        try:
+            rt = self.manager.runtimes.get(camera_id)
+            if rt is None or not rt.camera.connected:
+                return None
+            return rt.pipeline.jpeg("annotated", False, 1280, aspect=16 / 9) or None
+        except Exception:
+            return None
+
+    def _attach_evidence(self, rows: list) -> bool:
+        """Upload the evidence image of each detection (kind AI_MANAGER) and put its snapshotId on the row.
+        False when the server could not be reached (the batch is retried later)."""
+        for _, p in rows:
+            b64 = p.pop("_jpeg_b64", None)
+            if not b64 or p.get("snapshotId"):
+                continue
+            try:
+                resp = self._http.post(self.cfg.base_url.rstrip("/") + "/api/ingest/snapshot", headers=self._headers(uuid.uuid4().hex),
+                                       data={"cameraId": str(p["cameraId"]), "kind": "AI_MANAGER", "ts": p["ts"]},
+                                       files={"file": ("evidence.jpg", base64.b64decode(b64), "image/jpeg")}, timeout=30)
+            except requests.RequestException as e:
+                p["_jpeg_b64"] = b64
+                self._fail(f"evidence snapshot: {e}")
+                return False
+            self._note(resp, "/api/ingest/snapshot")
+            if resp.ok:
+                try:
+                    p["snapshotId"] = int(resp.json().get("snapshotId"))
+                    self.sent["snapshot"] += 1
+                except (ValueError, TypeError, AttributeError):
+                    pass
+        return True
+
+    def _count_rejections(self, kind: str, resp) -> None:
+        """The ingest answers 200 with {accepted, duplicates, rejected, errors[]}: dropped rows must not go unnoticed."""
+        try:
+            j = resp.json()
+        except ValueError:
+            return
+        n = int(j.get("rejected") or 0) if isinstance(j, dict) else 0
+        if n:
+            self.rejected[kind] = self.rejected.get(kind, 0) + n
+            first = (j.get("errors") or [None])[0]
+            self.last_reject = f"{kind}: {n} row(s) rejected: {json.dumps(first)[:200]}"
+            log.warning("Congruence Eye dropped %d %s row(s) (counted as sent): %s", n, kind, json.dumps(first)[:300])
+
     def _flush(self) -> None:
         for kind, (path, key) in KINDS.items():
             while not self._stop.is_set():
@@ -499,6 +554,11 @@ class CongruenceConnector:
                     for _, p in rows:
                         if "ruleId" not in p and p.get("type") in self._rules:
                             p["ruleId"] = self._rules[p["type"]]
+                    if not self._attach_evidence(rows):
+                        self._pending[kind] = ids
+                        return
+                    for _, p in rows:
+                        p.pop("_jpeg_b64", None)
                 body = rows[0][1] if key is None else {key: [p for _, p in rows]}
                 batch_id = hashlib.sha1(f"{kind}:{self.session_id}:{','.join(map(str, ids))}".encode()).hexdigest()
                 resp = self._post(path, body, batch_id)
@@ -508,6 +568,7 @@ class CongruenceConnector:
                 if resp.ok:
                     self.spool.delete(ids)
                     self.sent[kind] += len(ids)
+                    self._count_rejections(kind, resp)
                     continue
                 if resp.status_code in DEAD_STATUS or (resp.status_code == 403 and PERMANENT_403 in resp.text):
                     log.warning("Congruence Eye rejected %d %s row(s): HTTP %s %s", len(ids), kind, resp.status_code, resp.text[:200])

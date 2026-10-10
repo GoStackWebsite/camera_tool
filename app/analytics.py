@@ -54,6 +54,11 @@ def hue_distance(a: float, b: float) -> float:
     return min(d, 180 - d)
 
 
+MODEL_MIN_SAMPLES = 6        # learned classifier: samples (0.5 s apart) before a person can become staff
+MODEL_STAFF_PROB = 0.70      # mean P(staff) at or above this -> staff
+MODEL_CUSTOMER_PROB = 0.25   # a "uniform" staff whose mean drops to this (10+ samples) becomes a customer again
+
+
 def logo_mask(hsv: np.ndarray, hues: list, tol: int = 4) -> np.ndarray:
     """Pixels (rows of an N x 3 OpenCV HSV array) that are bright, saturated and close to one of the hues."""
     h = hsv[:, 0].astype(np.int16)
@@ -148,6 +153,7 @@ class Track:
     torso_ts: float = 0.0
     torso_anchored: bool = False                     # sample taken below a detected face
     uniform_votes: deque = field(default_factory=lambda: deque(maxlen=20))
+    model_votes: deque = field(default_factory=lambda: deque(maxlen=20))   # learned classifier: P(staff) per sample
     manual_staff: bool | None = None                 # True/False once a person tagged it by hand
     staff_reason: str = ""
     logo_frac: float = 0.0                           # last measured logo coverage of the chest crop (uniform logos)
@@ -170,10 +176,11 @@ def _fresh_minute(bucket: int) -> dict:
 
 class Analytics:
     def __init__(self, cam: CameraConfig, thr: Thresholds, store: Store | None, alerts: AlertManager | None,
-                 staff_cfg: StaffConfig | None = None):
+                 staff_cfg: StaffConfig | None = None, staff_model=None):
         self.cam = cam
         self.thr = thr
         self.staff_cfg = staff_cfg or StaffConfig()
+        self.staff_model = staff_model            # app.staffcls.StaffClassifier (learned uniform), optional
         self.store = store
         self.alerts = alerts
         self._lock = threading.RLock()
@@ -266,7 +273,7 @@ class Analytics:
 
     @property
     def staff_detection_active(self) -> bool:
-        return self.has_staff_zone or bool(self.staff_cfg.uniforms) or self.staff_cfg.after_minutes > 0
+        return self.staff_model is not None or self.has_staff_zone or bool(self.staff_cfg.uniforms) or self.staff_cfg.after_minutes > 0
 
     def active_tracks(self, now: float) -> list[Track]:
         with self._lock:
@@ -401,6 +408,7 @@ class Analytics:
                         "conf": round(t.conf, 2),
                         "anchored": t.torso_anchored, "votes": [int(sum(t.uniform_votes)), len(t.uniform_votes)],
                         "logo_pct": round(t.logo_frac * 100, 2),
+                        "model_pct": round(100 * sum(t.model_votes) / len(t.model_votes), 1) if t.model_votes else None,
                         "foot": [round(t.foot[0], 3), round(t.foot[1], 3)],
                     }
                     for t in sorted(active, key=lambda t: t.id)
@@ -597,7 +605,24 @@ class Analytics:
         plain = hsv[~marks] if 0 < np.count_nonzero(marks) <= 0.25 * len(hsv) else hsv
         mixed = float(plain[:, 2].std()) > 55        # desk + laptop + paper, not a single garment
         t.torso_anchored = anchored and not mixed
-        if not self.staff_cfg.uniforms or t.manual_staff is not None or t.staff_reason not in ("", "uniform"):
+        if t.manual_staff is not None or t.staff_reason not in ("", "uniform"):
+            return
+        if self.staff_model is not None:
+            # learned uniform classifier (models/staff_cls.pt): decides on its own, the colour rules below are
+            # only used when no model is installed
+            prob = self.staff_model.staff_prob(frame, t.bbox)
+            if prob is not None:
+                t.model_votes.append(prob)
+                n = len(t.model_votes)
+                mean = sum(t.model_votes) / n
+                if not t.is_staff and n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB:
+                    self._set_staff(t, now, "uniform")
+                elif t.is_staff and t.staff_reason == "uniform" and n >= 10 and mean <= MODEL_CUSTOMER_PROB:
+                    t.is_staff = False
+                    t.staff_reason = ""
+                    self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff, counted as customer")
+            return
+        if not self.staff_cfg.uniforms:
             return
         plain = [u for u in self.staff_cfg.uniforms if not has_logo(u)]
         logos = [u for u in self.staff_cfg.uniforms if has_logo(u)]

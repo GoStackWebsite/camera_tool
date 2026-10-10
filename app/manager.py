@@ -15,6 +15,7 @@ from .analytics import Analytics
 from .camera import RTSPCamera
 from .config import MODELS_DIR, AppConfig, CameraConfig, ConfigStore, Settings, StaffConfig, Thresholds, mask_url
 from .demographics import Demographics
+from .staffcls import StaffClassifier
 from .detector import PersonTracker
 from .notify import Notifier
 from .pipeline import Pipeline
@@ -83,7 +84,8 @@ class Manager:
         log.info("Starting camera %s (%s): %s", cam.id, cam.name, mask_url(cam.url))
         camera = RTSPCamera(cam.url)
         tracker = PersonTracker(self.settings.model, self.settings.device, self.settings.conf, self.settings.imgsz)
-        analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff)
+        staff_model = StaffClassifier.create(MODELS_DIR)      # learned uniform, when models/staff_cls.pt exists
+        analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model)
         demographics = Demographics.create(MODELS_DIR) if self.config.demographics.enabled else None
         pipeline = Pipeline(camera, tracker, analytics, self.settings, cam.target_fps, demographics, self.config_store)
         rt = CameraRuntime(cam, camera, tracker, analytics, pipeline, time.time())
@@ -207,6 +209,7 @@ class Manager:
             "open_alerts": self.alerts.list_open(),
             "notifier": {"sent": self.notifier.sent, "last_error": self.notifier.last_error},
             "congruence": self.connector.status() if self.connector else None,
+            "staff_model": next((rt.analytics.staff_model.info() for rt in runtimes if rt.analytics.staff_model), {"loaded": False}),
             "demographics": {"enabled": self.config.demographics.enabled,
                              "available": any(rt.pipeline.demographics is not None for rt in runtimes),
                              "faces_seen": sum(rt.pipeline.demographics.faces_seen for rt in runtimes if rt.pipeline.demographics)},

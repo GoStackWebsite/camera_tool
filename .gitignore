@@ -28,3 +28,11 @@ models/*.onnx
 
 # packaged source archives
 dist/
+
+# training data and runs (large, store specific)
+datasets/staff/
+runs/
+yolo11n-cls.pt
+
+# the portable staff-uniform model is versioned on purpose (small; reused by other stores)
+!models/staff_cls.pt

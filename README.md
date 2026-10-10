@@ -174,3 +174,28 @@ The connector sends, using the same `/api/ingest/*` contract as Congruence Eye's
 Everything except heartbeats and snapshots goes through a write-ahead spool (`data/congruence.db`) and is
 replayed in order once the server is reachable again; batches carry an idempotency id so retries never
 duplicate data. The header shows the connection state, and the Settings card shows what was sent.
+
+## Staff recognition with a learned model
+
+Colour rules alone miss uniforms with small prints (measured on a day of captures: 34 % recall). A small image
+classifier trained on labelled person crops does much better (88-94 % on frames it never saw):
+
+```bat
+.venv\Scripts\python tools\staff_train.py --build datasets\labels.csv --frames "<folder with captured frames>"
+.venv\Scripts\python tools\staff_train.py --train
+```
+
+`labels.csv` has `file,x1,y1,x2,y2,label` (pixel box of a person, label `staff` or `customer`). Training writes
+`models\staff_cls.pt`; the engine loads it at start and uses it before the colour rules (Settings › Staff detection
+shows "learned uniform model"). Copy that file to every store of the same chain: no training needed there. A chain
+with a different uniform labels ~150 crops from its own captures and trains once.
+
+## Tests and tooling
+
+- `tools\e2e_test.py` replays a recorded day of real visits into an isolated Congruence Eye test store and checks
+  traffic, demographics, zones, queue, AI detections with evidence snapshots, live, store-ops and infra health
+  through the analytics API (report in `logs\e2e_report.json`).
+- `mcp_server\` is an MCP server ("congruence-eye") for Claude: analyse all stores, engine status, feature audit,
+  staff recognition report, train/evaluate the staff model. See `mcp_server\README.md`.
+- `docs\market-comparison.md` compares the platform with RetailNext, Sensormatic ShopperTrak, V-Count and Tango Eye
+  and lists the roadmap.
