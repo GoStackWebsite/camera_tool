@@ -276,6 +276,22 @@ class CongruenceConnector:
         self.spool.put("events", ev)
         self._wake_soon()
 
+    def compliance(self, local_cam: str, rule: str, message: str, ts: float, track_id: int | None = None) -> None:
+        """A COMPLIED AI-manager detection (e.g. a staff phone demo): the server's compliance % needs the good cases too."""
+        if not self.configured():
+            return
+        cid = self.cam_id(local_cam)
+        if cid is None:
+            return
+        d = {"type": rule, "cameraId": cid, "ts": iso(ts), "status": "COMPLIED", "details": message[:1000]}
+        if rule in self._rules:
+            d["ruleId"] = self._rules[rule]
+        jpeg = self._evidence_jpeg(local_cam)
+        if jpeg:
+            d["_jpeg_b64"] = base64.b64encode(jpeg).decode()
+        self.spool.put("detections", d)
+        self._wake_soon()
+
     def pos_transactions(self, txs: list[dict]) -> int:
         """Forward normalised bills (app.pos) to the server's POS endpoint for this store; returns how many were queued."""
         if not self.configured():

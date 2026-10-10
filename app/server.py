@@ -602,14 +602,22 @@ class UniformIn(BaseModel):
             raise ValueError("logo hues must be between 0 and 179")
 
 
+class BrandIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    hue: int = Field(ge=0, le=179)
+    tol: int = Field(6, ge=1, le=20)
+
+
 class StaffIn(BaseModel):
     after_minutes: float = Field(45, ge=0, le=24 * 60)
     uniforms: list[UniformIn] = []
+    brands: list[BrandIn] = []
 
 
 @app.put("/api/config/staff")
 async def put_staff(body: StaffIn):
-    cfg = StaffConfig(after_minutes=body.after_minutes, uniforms=[u.model_dump() for u in body.uniforms])
+    cfg = StaffConfig(after_minutes=body.after_minutes, uniforms=[u.model_dump() for u in body.uniforms],
+                      brands=[b.model_dump() for b in body.brands])
     await run_in_threadpool(rt.manager.apply_staff, cfg)
     return rt.config_store.config.to_dict()["staff"]
 

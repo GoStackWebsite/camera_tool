@@ -114,6 +114,7 @@
         <div class="tile"><div class="label">Engaged visits today</div><div class="value" id="kEng">–</div><div class="sub" id="kEngSub"></div></div>
         <div class="tile"><div class="label">Avg dwell today</div><div class="value" id="kDwell">–</div></div>
         <div class="tile"><div class="label">Conversion today</div><div class="value" id="kConv">–</div><div class="sub" id="kConvSub"></div></div>
+        <div class="tile"><div class="label">Walk-ins by brand</div><div class="value" id="kBrand" style="font-size:18px">–</div><div class="sub" id="kBrandSub">served ≥ 20 s by a brand's staff</div></div>
         <div class="tile"><div class="label">Capture rate today</div><div class="value" id="kCapture">–</div><div class="sub" id="kCaptureSub">draw a "Pass-by" line in Congruence Eye</div></div>
         <div class="tile"><div class="label">In queue now</div><div class="value" id="kQueue">–</div><div class="sub" id="kQueueSub"></div></div>
         <div class="tile"><div class="label">Open alerts</div><div class="value" id="kAlerts">–</div></div>
@@ -266,6 +267,7 @@
     <div class="card mt"><h2>Staff detection</h2>
       <form class="form" id="fStaff">
         <label>Treat anyone present longer than (minutes) as staff, 0 = off<input name="after_minutes" type="number" min="0" step="5"></label>
+        <label class="wide">Brands by logo colour (name:hue, OpenCV hue 0-179; e.g. GoFix:155, GoGizmo:36). Customers are attributed to the brand whose staff served them longest.<input name="brands_text" placeholder="GoFix:155, GoGizmo:36"></label>
       </form>
       <div class="mt"><b style="font-size:13px">Learned uniform model</b><div id="staffModelHint" class="hint mt">Not installed: the colour rules below are used. Train one from labelled captures with <code>tools\staff_train.py</code> (or the MCP tool <code>train_staff_model</code>); the file <code>models\staff_cls.pt</code> can be copied to every store of the chain.</div></div>
       <div class="mt"><b style="font-size:13px">Uniform colours</b><div id="uniformList" class="mt"></div></div>
@@ -620,6 +622,7 @@
     $('#kEng').textContent = t.engaged_pct + '%'; $('#kEngSub').textContent = `${t.engaged} engaged · ${t.bounced} bounced`;
     $('#kDwell').textContent = t.avg_dwell ? fmtDur(t.avg_dwell) : '–';
     $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings or connect the POS' : `${t.sales.bills} bills`;
+    { const b = t.by_brand || {}; const parts = Object.keys(b).filter(k => k !== 'unattended').map(k => `${k} ${b[k]}`); $('#kBrand').textContent = parts.length ? parts.join(' · ') : '–'; $('#kBrandSub').textContent = b.unattended != null ? `${b.unattended} not attended ≥ 20 s` : "served ≥ 20 s by a brand's staff"; }
     $('#kCapture').textContent = t.capture_rate_pct == null ? '–' : t.capture_rate_pct + '%'; $('#kCaptureSub').textContent = t.passby ? `${t.walk_ins} walk-ins of ${t.passby} passers-by` : 'draw a "Pass-by" line in Congruence Eye';
   }
   function renderTraffic(t) {
@@ -747,6 +750,7 @@
   $('#btnPosScan').onclick = async () => { try { const r = await api('/api/pos/scan', 'POST'); toast(`Processed ${r.bills} bill(s)`); renderPosStatus(); } catch (e) { toast('Scan failed: ' + e.message); } };
   function renderSettings() {
     fillForm($('#fPos'), CFG.pos || {}); renderAuditCard(); renderPosStatus();
+    $('#fStaff [name=brands_text]').value = ((CFG.staff && CFG.staff.brands) || []).map(b => `${b.name}:${b.hue}`).join(', ');
     fillForm($('#fStore'), CFG.store); fillForm($('#fThr'), CFG.thresholds); fillForm($('#fNotify'), CFG.notifications); fillForm($('#fReport'), CFG.report); fillForm($('#fDemo'), CFG.demographics || {}); fillForm($('#fStaff'), CFG.staff || {}); renderUniforms(); renderCE();
     const nt = $('#notifyTypes'); nt.innerHTML = ''; Object.entries(ALERT_LABEL).forEach(([k, l]) => { const lab = document.createElement('label'); lab.className = 'check'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = k; cb.checked = (CFG.notifications.types || []).includes(k); lab.appendChild(cb); lab.append(' ' + l); nt.appendChild(lab); });
     if (!$('#fSales input[name=date]').value) $('#fSales input[name=date]').value = new Date().toISOString().slice(0, 10);
@@ -767,7 +771,7 @@
   document.addEventListener('click', async e => {
     const b = e.target.closest('[data-save]'); if (!b) return; const what = b.dataset.save; const f = {store: '#fStore', thresholds: '#fThr', notifications: '#fNotify', report: '#fReport', demographics: '#fDemo', staff: '#fStaff', pos: '#fPos'}[what]; const o = formToObj($(f));
     if (what === 'pos') { o.forward = $('#fPos [name=forward]').checked; o.inbox_enabled = $('#fPos [name=inbox_enabled]').checked; }
-    if (what === 'staff') o.uniforms = (CFG.staff && CFG.staff.uniforms) || [];
+    if (what === 'staff') { o.uniforms = (CFG.staff && CFG.staff.uniforms) || []; o.brands = String(o.brands_text || '').split(',').map(x => x.trim()).filter(Boolean).map(x => { const [n, h] = x.split(':'); return {name: n.trim(), hue: parseInt(h, 10)}; }).filter(b => b.name && !isNaN(b.hue)); delete o.brands_text; }
     if (what === 'notifications') o.types = $$('#notifyTypes input:checked').map(i => i.value);
     try { await api(`/api/config/${what}`, 'PUT', o); toast('Saved'); await loadConfig(); } catch (err) { toast('Save failed: ' + err.message); }
   });

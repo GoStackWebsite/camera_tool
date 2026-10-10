@@ -175,6 +175,8 @@ class Thresholds:
     line_margin: float = 0.015        # count line: feet closer than this (fraction of the frame) are "on the line"
     line_min_frames: int = 2          # count line: frames a person must stay on the new side before it counts
     line_cooldown_seconds: float = 1.5  # count line: minimum gap between two crossings of the same person
+    serve_seconds: float = 20.0       # a customer attended this long by one brand's staff is that brand's walk-in
+    demo_share: float = 0.5           # staff phone episode with a customer nearby for this share of it = product demo
 
 
 @dataclass
@@ -226,6 +228,7 @@ class PosConfig:
 class StaffConfig:
     after_minutes: float = 45.0   # anyone present this long is treated as staff (0 = off)
     uniforms: list = field(default_factory=list)   # [{"name": str, "h": 0-179, "s": 0-255, "v": 0-255}]
+    brands: list = field(default_factory=list)     # [{"name": "GoFix", "hue": 155}, ...]: logo colour that tells the brands apart
 
 
 def uniform_kind(h: int, s: int, v: int) -> str:

@@ -217,3 +217,18 @@ with a different uniform labels ~150 crops from its own captures and trains once
   linked from the alert history, the notification and the Congruence Eye detection.
 - Tests: `tools\e2e_features.py` (mock push/WhatsApp server, POS shapes + CSV, audit maths, pass-by zone
   round trip, clip from a recorded video) and `tools\e2e_test.py` (server pipeline).
+
+## Brand attribution and phone demos (2026-10-10)
+
+- **Which brand got the walk-in** (combined GoFix + GoGizmo stores): Settings > Staff detection > "Brands by logo
+  colour" (`GoFix:155, GoGizmo:36`). The engine reads the logo colour on every staff member's chest and names the
+  brand; each customer accumulates attended seconds per brand (staff within `attend_distance`); at the end of the
+  visit the brand with the most time (>= `serve_seconds`, default 20 s) owns the walk-in. Live tile "Walk-ins by
+  brand", `/api/traffic` -> `by_brand`, `served` events, visits.brand. In Congruence Eye create a SECTION zone named
+  "Served by <brand>" on each camera: the engine sends the attributed visit there, so zone analytics show walk-ins,
+  dwell and gender per brand.
+- **Phone demo vs personal phone**: a staff phone episode with a customer within `attend_distance` for at least
+  `demo_share` (50 %) of its duration is a product demo: event `phone_demo`, COMPLIED MOBILE_USAGE detection in
+  Congruence Eye (evidence snapshot attached), no alert. The rest stays a personal-use breach. Next refinement:
+  pose keypoints (head down / phone low = scrolling, phone held out = demo).
+- Test: `tools\e2e_brand.py` (recorded shop video).

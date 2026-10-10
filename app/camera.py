@@ -102,15 +102,32 @@ class RTSPCamera(threading.Thread):
         self.last_error = ""
         return cap
 
+    @property
+    def is_file(self) -> bool:
+        """A recorded video (path, no scheme): replayed in real time and looped, for tests and demos."""
+        u = (self.url or "").strip().lower()
+        return bool(u) and "://" not in u
+
     def _read_loop(self, cap: cv2.VideoCapture) -> None:
         """Publish frames until the stream goes silent for STALL_SECONDS (then return so run() reconnects)."""
         tick = time.time()
         frames = 0
         last = tick                      # the successful open counts as activity
+        is_file = self.is_file
+        pace = (1.0 / self.source_fps) if (is_file and self.source_fps and self.source_fps > 0) else 0.0
+        t_start, n_read = time.time(), 0
         while not self._stop.is_set():
+            if pace:                      # recorded video: hold the file's own frame rate instead of decode speed
+                wait = t_start + n_read * pace - time.time()
+                if wait > 0:
+                    time.sleep(min(wait, 1.0))
             ok, frame = cap.read()
+            n_read += 1
             now = time.time()
             if not ok or frame is None:
+                if is_file:               # end of the recording: let run() reopen it (loops the video)
+                    self.last_error = ""
+                    return
                 if now - last >= STALL_SECONDS:
                     self.last_error = f"no frames for {now - last:.0f}s"
                     self.stalls += 1

@@ -54,6 +54,7 @@ def hue_distance(a: float, b: float) -> float:
     return min(d, 180 - d)
 
 
+BRAND_MIN_PX = 40            # logo pixels of one brand colour on the chest (summed over samples) before the brand is known
 MODEL_MIN_SAMPLES = 6        # learned classifier: samples (0.5 s apart) before a person can become staff
 MODEL_STAFF_PROB = 0.70      # mean P(staff) at or above this -> staff
 MODEL_CUSTOMER_PROB = 0.25   # a "uniform" staff whose mean drops to this (10+ samples) becomes a customer again
@@ -136,6 +137,12 @@ class Track:
     pb_pending: int = 0
     pb_n: int = 0
     pb_counted: bool = False                        # a track is one passer-by however often it wanders over the line
+    brand_px: dict = field(default_factory=dict)    # staff: logo pixels seen per brand colour
+    brand: str | None = None                        # staff: brand of the uniform (from the logo colour)
+    served: dict = field(default_factory=dict)      # customer: seconds attended per staff brand (resolved at visit end)
+    served_by: dict = field(default_factory=dict)   # customer: seconds attended per staff track id
+    phone_near: float = 0.0                         # staff phone episode: seconds with a customer within attend_distance
+    phone_total: float = 0.0
     loitering: bool = False
     run_alerted: bool = False
     path_len: float = 0.0
@@ -197,6 +204,9 @@ class Analytics:
         self._recent_ins: deque = deque(maxlen=50)      # (ts, fx, fy, group_id)
         self._zone_state: dict[str, dict] = {}
         self.passby = 0                               # people who crossed the pass-by (street) line today
+        self.served_today: dict[str, int] = {}        # walk-ins attributed per brand today
+        self._staff_brand: dict[int, str] = {}        # staff track id -> brand once the logo colour settled
+        self._prev_update = 0.0
         self.cfg_rev = 0
         self.ce_heat = np.zeros((18, 32), np.int32)   # per-window foot-point counts for Congruence Eye
         self.emitter = None                           # Congruence Eye connector (attached by the connector)
@@ -347,6 +357,9 @@ class Analytics:
             active = [t for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
             customers = [t for t in active if not t.is_staff]
             staff = [t for t in active if t.is_staff]
+            fdt = min(1.0, now - self._prev_update) if self._prev_update else 0.0
+            self._prev_update = now
+            self._attend(customers, staff, fdt)
             occ = len(customers)
             self.peak = max(self.peak, occ)
             self._check_crowd(occ)
@@ -397,6 +410,8 @@ class Analytics:
                 "entries": self.entries,
                 "exits": self.exits,
                 "passby": self.passby,
+                "served_today": dict(self.served_today),
+                "staff_brands": {b: sum(1 for t in active if t.is_staff and t.brand == b) for b in {t.brand for t in active if t.is_staff and t.brand}},
                 "capture_rate_pct": round(100.0 * self.entries / self.passby, 1) if self.passby else None,
                 "has_passby": bool(self.cam.passby_line),
                 "groups_in": self.groups_in,
@@ -421,6 +436,8 @@ class Analytics:
                         "anchored": t.torso_anchored, "votes": [int(sum(t.uniform_votes)), len(t.uniform_votes)],
                         "logo_pct": round(t.logo_frac * 100, 2),
                         "model_pct": round(100 * sum(t.model_votes) / len(t.model_votes), 1) if t.model_votes else None,
+                        "brand": t.brand, "served": self._served_live(t) or None,
+                        "phone_demo_pct": round(100 * t.phone_near / t.phone_total) if t.phone_total else None,
                         "foot": [round(t.foot[0], 3), round(t.foot[1], 3)],
                     }
                     for t in sorted(active, key=lambda t: t.id)
@@ -482,6 +499,72 @@ class Analytics:
                 self.alerts.fire(f"loiter:{self.cam.id}:{t.id}", "loiter",
                                  f"{self.cam.name}: visitor #{t.id} lingering for {t.dwell(now) / 60:.0f} min",
                                  self.cam.id, None, t.id)
+
+    def _vote_brand(self, t: Track, frame: np.ndarray, anchored: bool) -> None:
+        """Count logo-coloured pixels on the chest for each configured brand; the dominant colour names the brand."""
+        x1, y1, x2, y2 = t.bbox
+        bw, bh = x2 - x1, y2 - y1
+        if anchored and t.face_box:
+            fx1, fy1, fx2, fy2 = t.face_box
+            fw, fh = fx2 - fx1, fy2 - fy1
+            cx = (fx1 + fx2) // 2
+            lx1, lx2, ly1, ly2 = cx - int(fw * 1.1), cx + int(fw * 1.1), fy2 + int(fh * 0.2), fy2 + int(fh * 1.6)
+        else:
+            lx1, lx2, ly1, ly2 = x1 + int(bw * 0.15), x2 - int(bw * 0.15), y1 + int(bh * 0.12), y1 + int(bh * 0.55)
+        lx1, lx2 = max(x1, lx1, 0), min(x2, lx2, frame.shape[1])
+        ly1, ly2 = max(y1, ly1, 0), min(y2, ly2, frame.shape[0])
+        if lx2 - lx1 < 4 or ly2 - ly1 < 4:
+            return
+        hsv = cv2.cvtColor(frame[ly1:ly2, lx1:lx2], cv2.COLOR_BGR2HSV).reshape(-1, 3)
+        for b in self.staff_cfg.brands:
+            name, hue = str(b.get("name") or "").strip(), b.get("hue")
+            if not name or hue is None:
+                continue
+            t.brand_px[name] = t.brand_px.get(name, 0) + int(np.count_nonzero(logo_mask(hsv, [int(hue)], int(b.get("tol", 6)))))
+        if t.brand_px:
+            best = max(t.brand_px, key=t.brand_px.get)
+            rest = max([v for k, v in t.brand_px.items() if k != best] or [0])
+            if t.brand_px[best] >= BRAND_MIN_PX and t.brand_px[best] >= 2 * rest:
+                t.brand = best
+
+    def _attend(self, customers: list[Track], staff: list[Track], dt: float) -> None:
+        """Per frame: which brand's staff is near each customer (walk-in attribution) and whether a staff member
+        on the phone has a customer in front (product demo rather than personal use)."""
+        if dt <= 0 or not staff:
+            return
+        near = self.thr.attend_distance
+        for s in staff:
+            sx, sy = s.foot
+            any_near = False
+            for c in customers:
+                if math.hypot(sx - c.foot[0], sy - c.foot[1]) <= near:
+                    any_near = True
+                    c.served_by[s.id] = c.served_by.get(s.id, 0.0) + dt
+            if s.brand:
+                self._staff_brand[s.id] = s.brand
+            if s.phone_since:
+                s.phone_total += dt
+                if any_near:
+                    s.phone_near += dt
+
+    def _served_live(self, t: Track) -> dict:
+        out: dict[str, float] = {}
+        for sid, secs in t.served_by.items():
+            key = self._staff_brand.get(sid) or "staff"
+            out[key] = round(out.get(key, 0.0) + secs, 1)
+        return out
+
+    def _served_brand(self, t: Track) -> tuple[str | None, float]:
+        # resolve per-staff seconds into brands now: a staff member's brand is often only known after a few samples
+        t.served = {}
+        for sid, secs in t.served_by.items():
+            key = self._staff_brand.get(sid) or "staff"
+            t.served[key] = t.served.get(key, 0.0) + secs
+        if not t.served:
+            return None, 0.0
+        best = max(t.served, key=t.served.get)
+        secs = t.served[best]
+        return (best if secs >= self.thr.serve_seconds else None), round(sum(t.served.values()), 1)
 
     def _update_passby(self, t: Track, now: float, fx: float, fy: float) -> None:
         """Count a track once when it crosses the pass-by line (either direction, inside the drawn segment).
@@ -654,6 +737,8 @@ class Analytics:
         plain = hsv[~marks] if 0 < np.count_nonzero(marks) <= 0.25 * len(hsv) else hsv
         mixed = float(plain[:, 2].std()) > 55        # desk + laptop + paper, not a single garment
         t.torso_anchored = anchored and not mixed
+        if self.staff_cfg.brands:
+            self._vote_brand(t, frame, anchored)
         if t.manual_staff is not None or t.staff_reason not in ("", "uniform"):
             return
         if self.staff_model is not None:
@@ -738,9 +823,21 @@ class Analytics:
             if t.phone_since and now - t.phone_last > PHONE_GAP:
                 t.phone_since = None
                 t.phone_alerted = False
+                t.phone_near = t.phone_total = 0.0
             if (t.phone_since and not t.phone_alerted and now - t.phone_since >= self.thr.phone_seconds
                     and (t.is_staff or self.thr.phone_everyone)):
                 t.phone_alerted = True
+                if t.is_staff and t.phone_total > 0 and t.phone_near / t.phone_total >= self.thr.demo_share:
+                    # a customer was in front for most of the episode: a product demo, not personal use
+                    share = int(100 * t.phone_near / t.phone_total)
+                    self._event(now, "phone_demo", t.id, f"Staff #{t.id} showing a phone to a customer ({share}% of the time with a customer)")
+                    em = self.emitter
+                    if em is not None and hasattr(em, "compliance"):
+                        try:
+                            em.compliance(self.cam.id, "MOBILE_USAGE", f"{self.cam.name}: staff #{t.id} phone demo to a customer ({share}% attended)", now, t.id)
+                        except Exception:
+                            log.exception("compliance emit failed")
+                    continue
                 self._event(now, "phone", t.id, f"Person #{t.id} using a phone")
                 if self.alerts:
                     who = "staff" if t.is_staff else "person"
@@ -772,12 +869,20 @@ class Analytics:
         for zname in list(t.zones):
             self._leave_zone(t, zname, t.last_seen)
         self._event(now, "leave", t.id, f"{'Staff' if t.is_staff else 'Person'} #{t.id} left after {dwell:.0f}s")
+        brand, served = (None, 0.0) if t.is_staff else self._served_brand(t)
+        if brand:
+            self.served_today[brand] = self.served_today.get(brand, 0) + 1
+            self._event(t.last_seen, "served", t.id, f"Person #{t.id} served by {brand} staff for {t.served[brand]:.0f}s", f"Served by {brand}")
+            # Congruence Eye: a SECTION zone named "Served by <brand>" on this camera receives the visit, so its
+            # zone analytics (visits, dwell, gender) become the brand's walk-ins
+            self._emit_ce("ZONE_ENTER", t, max(t.first_seen, t.last_seen - t.served[brand]), zone=f"Served by {brand}")
+            self._emit_ce("ZONE_EXIT", t, t.last_seen, zone=f"Served by {brand}", dwell=t.served[brand])
         if self.store:
             self.store.add_visit({"camera_id": self.cam.id, "track_id": t.id, "start_ts": t.first_seen,
                                   "end_ts": t.last_seen, "dwell": dwell, "engaged": dwell >= self.thr.engage_seconds,
                                   "is_staff": t.is_staff, "zones": t.zone_seq, "crossed_in": t.crossed_in,
                                   "group_id": t.group_id, "gender": t.gender, "age": t.age,
-                                  "age_band": t.age_band})
+                                  "age_band": t.age_band, "brand": brand, "served_seconds": served})
 
     def _check_crowd(self, occ: int) -> None:
         if not self.alerts:

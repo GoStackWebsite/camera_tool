@@ -59,6 +59,15 @@ def day_bounds(ts: float | None = None) -> tuple[float, float]:
     return d.timestamp(), (d + timedelta(days=1)).timestamp()
 
 
+def _by_brand(visits: list[dict]) -> dict:
+    """Visits attributed to the brand whose staff served the customer (None = not attended long enough)."""
+    out: dict[str, int] = {}
+    for v in visits:
+        k = v.get("brand") or "unattended"
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
 class Store:
     def __init__(self, path: Path):
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -73,6 +82,9 @@ class Store:
                     self.conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {typ}")
             if "clip" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(alerts)")}:
                 self.conn.execute("ALTER TABLE alerts ADD COLUMN clip TEXT")
+            for col, typ in (("brand", "TEXT"), ("served_seconds", "REAL")):
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {typ}")
             self.conn.commit()
 
     def _exec(self, sql: str, params: tuple = ()) -> int | None:
@@ -98,10 +110,10 @@ class Store:
 
     def add_visit(self, v: dict) -> None:
         self._exec("INSERT INTO visits(camera_id, track_id, start_ts, end_ts, dwell, engaged, is_staff, zones, crossed_in, group_id,"
-                   " gender, age, age_band) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   " gender, age, age_band, brand, served_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (v["camera_id"], v["track_id"], v["start_ts"], v["end_ts"], v["dwell"], int(v["engaged"]),
                     int(v["is_staff"]), json.dumps(v["zones"]), int(v["crossed_in"]), v.get("group_id"),
-                    v.get("gender"), v.get("age"), v.get("age_band")))
+                    v.get("gender"), v.get("age"), v.get("age_band"), v.get("brand"), v.get("served_seconds")))
 
     def add_zone_visit(self, z: dict) -> None:
         self._exec("INSERT INTO zone_visits(camera_id, zone, track_id, enter_ts, exit_ts, dwell, is_staff) VALUES (?,?,?,?,?,?,?)",
@@ -247,7 +259,7 @@ class Store:
         """Footfall funnel, hourly series and the weekday x hour peak matrix for a period."""
         cam_sql = " AND camera_id = ?" if camera_id else ""
         cam_p: tuple = (camera_id,) if camera_id else ()
-        visits = self._rows(f"SELECT start_ts, dwell, engaged, crossed_in, group_id FROM visits"
+        visits = self._rows(f"SELECT start_ts, dwell, engaged, crossed_in, group_id, brand FROM visits"
                             f" WHERE start_ts >= ? AND start_ts < ? AND is_staff = 0{cam_sql}", (since, until) + cam_p)
         crossings = self._rows(f"SELECT ts, direction, group_id FROM crossings"
                                f" WHERE ts >= ? AND ts < ? AND is_staff = 0{cam_sql}", (since, until) + cam_p)
@@ -290,7 +302,7 @@ class Store:
         conversion = round(sales["bills"] / walk_ins * 100, 1) if walk_ins and sales["bills"] else None
         return {
             "since": since, "until": until, "has_line": has_line,
-            "walk_ins": walk_ins, "passby": len(passes), "capture_rate_pct": round(100.0 * walk_ins / len(passes), 1) if passes else None, "groups": groups, "exits": len(outs),
+            "walk_ins": walk_ins, "by_brand": _by_brand(visits), "passby": len(passes), "capture_rate_pct": round(100.0 * walk_ins / len(passes), 1) if passes else None, "groups": groups, "exits": len(outs),
             "visits": len(visits), "engaged": engaged, "bounced": bounced,
             "engaged_pct": round(engaged / len(visits) * 100, 1) if visits else 0.0,
             "avg_dwell": round(avg_dwell, 1),
