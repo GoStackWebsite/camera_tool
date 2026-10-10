@@ -292,6 +292,20 @@ class CongruenceConnector:
         self.spool.put("detections", d)
         self._wake_soon()
 
+    def count_audit(self, a: dict, camera_name: str) -> None:
+        """A manual-count audit result for the server's Infra health (store-ops event COUNT_AUDIT, details = JSON)."""
+        if not self.configured():
+            return
+        ev = {"type": "COUNT_AUDIT", "ts": iso(a["end_ts"]),
+              "details": json.dumps({"accuracyIn": a["accuracy_in"], "accuracyOut": a.get("accuracy_out"), "manualIn": a["manual_in"],
+                                     "engineIn": a["engine_in"], "manualOut": a.get("manual_out"), "engineOut": a["engine_out"],
+                                     "minutes": round((a["end_ts"] - a["start_ts"]) / 60, 1), "camera": camera_name, "note": a.get("note")})[:1000]}
+        cid = self.cam_id(a["camera_id"])
+        if cid is not None:
+            ev["cameraId"] = cid
+        self.spool.put("storeops", ev)
+        self._wake_soon()
+
     def pos_transactions(self, txs: list[dict]) -> int:
         """Forward normalised bills (app.pos) to the server's POS endpoint for this store; returns how many were queued."""
         if not self.configured():

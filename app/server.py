@@ -569,6 +569,8 @@ async def add_audit(body: AuditIn):
          "engine_in": c["in"], "engine_out": c["out"], "accuracy_in": _accuracy(c["in"], body.manual_in),
          "accuracy_out": _accuracy(c["out"], body.manual_out), "note": body.note}
     a["id"] = await run_in_threadpool(rt.store.add_audit, a)
+    cam = rt.config_store.config.camera(body.camera_id)
+    rt.connector.count_audit(a, cam.name if cam else body.camera_id)
     return a
 
 

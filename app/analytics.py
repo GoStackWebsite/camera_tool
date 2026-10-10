@@ -599,6 +599,7 @@ class Analytics:
             t.pb_counted = True
             self.passby += 1
             self._event(now, "pass_by", t.id, f"Person #{t.id} passed by")
+            self._emit_ce("PASS_BY", t, now)
             if self.store:
                 self.store.add_crossing({"camera_id": self.cam.id, "ts": now, "direction": "pass", "track_id": t.id,
                                          "group_id": t.group_id, "is_staff": t.is_staff})
