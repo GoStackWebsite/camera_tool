@@ -29,6 +29,11 @@ log = logging.getLogger("sync")
 
 STAGE_ASPECT = 16 / 9
 ROLE_MAP = {"SECTION": "display", "QUEUE": "queue", "STAFF_ONLY": "staff"}   # ENTRY_LINE -> count line, SHELF skipped
+
+
+def is_passby_name(name) -> bool:
+    n = str(name or "").strip().lower().replace("-", "").replace(" ", "").replace("_", "")
+    return n.startswith("pass")
 DIRECTIONS = {"UP": (0.0, -1.0), "DOWN": (0.0, 1.0), "LEFT": (-1.0, 0.0), "RIGHT": (1.0, 0.0)}
 
 
@@ -87,8 +92,12 @@ def plan_cameras(remote: dict, frame_sizes: dict[str, tuple[int, int]]) -> tuple
         lid = local_id(rid)
         fw, fh = frame_sizes.get(lid, (0, 0))
         zl = sorted(zones_by_cam.get(rid, []), key=lambda z: int(z.get("id", 0)))
-        lines = [z for z in zl if z.get("type") == "ENTRY_LINE" and len(z.get("polygon") or []) == 2]
-        line = remote_line = None
+        all_lines = [z for z in zl if z.get("type") == "ENTRY_LINE" and len(z.get("polygon") or []) == 2]
+        # an ENTRY_LINE whose name starts with "pass" (e.g. "Pass-by") is the street-side line: everyone crossing
+        # it is a passer-by and walk-ins / passers-by is the capture rate
+        pb = [z for z in all_lines if is_passby_name(z.get("name"))]
+        lines = [z for z in all_lines if not is_passby_name(z.get("name"))]
+        line = remote_line = passby_line = remote_passby = None
         if lines:
             z = lines[0]
             line = orient_line([stage_to_frame(p, fw, fh) for p in z["polygon"]], z.get("inDirection"))
@@ -96,6 +105,10 @@ def plan_cameras(remote: dict, frame_sizes: dict[str, tuple[int, int]]) -> tuple
                            "in_direction": str(z.get("inDirection") or "UP").upper()}
             if len(lines) > 1:
                 notes.append(f"{c.get('name')}: {len(lines)} entry lines on the server, using '{z.get('name')}'")
+        if pb:
+            z = pb[0]
+            passby_line = [stage_to_frame(p, fw, fh) for p in z["polygon"]]
+            remote_passby = {"zone_id": int(z["id"]), "points": [[float(p[0]), float(p[1])] for p in z["polygon"]]}
         zones: list[ZoneConfig] = []
         used: set[str] = set()
         for z in zl:
@@ -113,7 +126,7 @@ def plan_cameras(remote: dict, frame_sizes: dict[str, tuple[int, int]]) -> tuple
                                     remote_id=int(z["id"]), remote_points=[[float(p[0]), float(p[1])] for p in poly]))
         desired.append(CameraConfig(id=lid, name=str(c.get("name") or lid)[:60], url=usable_url(c.get("rtspUrl")),
                                     line=line, zones=zones, managed=True, remote_id=rid, remote_line=remote_line,
-                                    frame_w=fw, frame_h=fh))
+                                    passby_line=passby_line, remote_passby=remote_passby, frame_w=fw, frame_h=fh))
     return desired, notes
 
 
@@ -319,7 +332,11 @@ class Reconciler:
                     line = orient_line([stage_to_frame(p, fw, fh) for p in rl["points"]], rl.get("in_direction"))
                 zones = [replace(z, points=[stage_to_frame(p, fw, fh) for p in z.remote_points]) if z.remote_points else z
                          for z in cam.zones]
-                new = replace(cam, line=line, zones=zones)
+                passby = cam.passby_line
+                rp = cam.remote_passby or {}
+                if len(rp.get("points") or []) == 2:
+                    passby = [stage_to_frame(p, fw, fh) for p in rp["points"]]
+                new = replace(cam, line=line, zones=zones, passby_line=passby)
             self.manager.update_camera(new)
 
     def set_local(self, cam_id: str, url_override: str | None = None, target_fps: float | None = None,

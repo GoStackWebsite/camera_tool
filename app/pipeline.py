@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections import deque
 import time
 
 import cv2
@@ -127,6 +128,10 @@ def draw_overlay(frame: np.ndarray, tracks: list[Track], cam: CameraConfig, stat
             _label(img, txt, int(pts[0][0]), int(pts[0][1]) - 4, color, scale)
 
     # counting line with IN / OUT sides
+    if cam.passby_line:
+        (px, py), (qx, qy) = cam.passby_line
+        cv2.line(img, (int(px * w), int(py * h)), (int(qx * w), int(qy * h)), (255, 200, 0), 2)
+        cv2.putText(img, f"pass-by {stats.get('passby', 0)}", (int(px * w) + 4, int(py * h) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
     if cam.line:
         (ax, ay), (bx, by) = cam.line
         a = (int(ax * w), int(ay * h))
@@ -214,6 +219,11 @@ def placeholder_frame(message: str, size: tuple[int, int] = (1280, 720)) -> np.n
     return img
 
 
+RING_FPS = 4            # evidence-clip buffer: frames per second kept in memory
+RING_FRAMES = 100       # ~25 s at RING_FPS
+RING_WIDTH = 640
+
+
 class Pipeline(threading.Thread):
     def __init__(self, camera: RTSPCamera, tracker: PersonTracker, analytics: Analytics,
                  settings: Settings, target_fps: float = 0.0, demographics: Demographics | None = None,
@@ -235,6 +245,8 @@ class Pipeline(threading.Thread):
         self._seq = 0
         self._raw: np.ndarray | None = None
         self._annot: np.ndarray | None = None
+        self._ring: deque = deque(maxlen=RING_FRAMES)   # (ts, small annotated JPEG): the evidence-clip buffer
+        self._ring_ts = 0.0
         self._jpeg_cache: dict[tuple, tuple[int, bytes]] = {}
         self._placeholder: tuple[str, bytes] | None = None
         self.infer_fps = 0.0
@@ -301,6 +313,12 @@ class Pipeline(threading.Thread):
                 self._jpeg_cache.clear()
                 self.last_stats = stats
                 self._cond.notify_all()
+            if t0 - self._ring_ts >= 1.0 / RING_FPS:
+                self._ring_ts = t0
+                try:
+                    self._ring.append((t0, self._encode(annotated, RING_WIDTH)))
+                except Exception:
+                    pass
             n += 1
             ms_acc += (t1 - t0) * 1000
             if t0 - tick >= 2.0:
@@ -364,6 +382,10 @@ class Pipeline(threading.Thread):
         with self._cond:
             self._cond.wait_for(lambda: self._seq != last_seq, timeout)
             return self._seq
+
+    def recent_frames(self, t0: float, t1: float) -> list[tuple[float, bytes]]:
+        """Buffered annotated frames with t0 <= ts <= t1 (for evidence clips)."""
+        return [(ts, j) for ts, j in list(self._ring) if t0 <= ts <= t1]
 
     def jpeg(self, mode: str = "annotated", heat: bool = False, width: int | None = None,
              aspect: float | None = None) -> bytes | None:

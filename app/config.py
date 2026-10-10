@@ -137,6 +137,8 @@ class CameraConfig:
     remote_line: dict | None = None  # managed cameras: {"zone_id", "points", "in_direction"} as received from the server
     frame_w: int = 0                 # last decoded frame size (maps the server's 16:9 editor coordinates onto the frame)
     frame_h: int = 0
+    passby_line: list | None = None  # [[x, y], [x, y]] on the street / mall side: everyone crossing it is a passer-by
+    remote_passby: dict | None = None  # managed cameras: the server's "Pass-by" ENTRY_LINE zone {"zone_id", "points"}
 
     def __post_init__(self):
         self.zones = [z if isinstance(z, ZoneConfig) else _dc(ZoneConfig, z) for z in self.zones]
@@ -185,6 +187,13 @@ class StoreConfig:
 
 @dataclass
 class NotifyConfig:
+    ntfy_url: str = "https://ntfy.sh"       # phone push: the ntfy app subscribes to the topic (self-hosted servers work too)
+    ntfy_topic: str = ""
+    ntfy_token: str = ""
+    whatsapp_token: str = ""                # WhatsApp Business (Meta Cloud API) permanent token
+    whatsapp_phone_id: str = ""             # the sending phone number id
+    whatsapp_to: str = ""                   # recipients, comma separated, international format without +
+    whatsapp_api_base: str = "https://graph.facebook.com/v21.0"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     webhook_url: str = ""
@@ -205,6 +214,12 @@ class ReportConfig:
     enabled: bool = False
     daily_time: str = "21:30"
     email_to: str = ""
+
+
+@dataclass
+class PosConfig:
+    forward: bool = True          # forward bills to Congruence Eye (POST /api/pos/transactions with the edge key)
+    inbox_enabled: bool = True    # watch data/pos_inbox/*.csv (POS exports)
 
 
 @dataclass
@@ -257,6 +272,7 @@ class AppConfig:
     demographics: DemographicsConfig = field(default_factory=DemographicsConfig)
     staff: StaffConfig = field(default_factory=StaffConfig)
     congruence: CongruenceConfig = field(default_factory=CongruenceConfig)
+    pos: PosConfig = field(default_factory=PosConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "AppConfig":
@@ -269,6 +285,7 @@ class AppConfig:
             demographics=_dc(DemographicsConfig, d.get("demographics")),
             staff=_dc(StaffConfig, d.get("staff")),
             congruence=_dc(CongruenceConfig, d.get("congruence")),
+            pos=_dc(PosConfig, d.get("pos")),
         )
 
     def to_dict(self, mask: bool = False) -> dict:
@@ -281,10 +298,11 @@ class AppConfig:
             "demographics": asdict(self.demographics),
             "staff": asdict(self.staff),
             "congruence": asdict(self.congruence),
+            "pos": asdict(self.pos),
         }
         if mask:
             n = d["notifications"]
-            for k in ("telegram_bot_token", "smtp_password"):
+            for k in ("telegram_bot_token", "smtp_password", "whatsapp_token", "ntfy_token"):
                 if n.get(k):
                     n[k] = "***"
             if d["congruence"].get("api_key"):

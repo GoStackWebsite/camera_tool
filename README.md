@@ -199,3 +199,21 @@ with a different uniform labels ~150 crops from its own captures and trains once
   staff recognition report, train/evaluate the staff model. See `mcp_server\README.md`.
 - `docs\market-comparison.md` compares the platform with RetailNext, Sensormatic ShopperTrak, V-Count and Tango Eye
   and lists the roadmap.
+
+## Market-parity features (2026-10-10)
+
+- **Pass-by traffic and capture rate**: draw a second ENTRY_LINE named "Pass-by" (any name starting with
+  "pass") on a street- or mall-facing camera in Congruence Eye; the engine counts everyone crossing it once
+  and shows walk-ins / passers-by on the Live tiles (`/api/traffic` -> `passby`, `capture_rate_pct`).
+- **Counting accuracy audit** (Settings): start, count by hand for 15-30 minutes, enter your numbers; the
+  engine compares them with its own crossings and keeps the accuracy per camera (`/api/audits`).
+- **Phone push and WhatsApp** (Settings > Notifications): ntfy topic (install the ntfy app) and WhatsApp
+  Cloud API token / phone number id / recipients, next to Telegram, webhook and e-mail. Every alert links its
+  evidence clip.
+- **Live POS**: point the billing software at `POST /api/pos/transactions` (a bill, a list or
+  `{"transactions": [...]}` with the usual field names) or drop CSV exports into `data\pos_inbox\`. Bills drive
+  conversion here and are forwarded to Congruence Eye's POS API with the edge key.
+- **Evidence clips**: every alert with a camera gets an MP4 (10 s before, 8 s after) under `data\clips\`,
+  linked from the alert history, the notification and the Congruence Eye detection.
+- Tests: `tools\e2e_features.py` (mock push/WhatsApp server, POS shapes + CSV, audit maths, pass-by zone
+  round trip, clip from a recorded video) and `tools\e2e_test.py` (server pipeline).

@@ -36,3 +36,8 @@ yolo11n-cls.pt
 
 # the portable staff-uniform model is versioned on purpose (small; reused by other stores)
 !models/staff_cls.pt
+
+# POS drop folder and evidence clips (runtime data)
+data/pos_inbox/
+data/clips/
+datasets/*.mp4

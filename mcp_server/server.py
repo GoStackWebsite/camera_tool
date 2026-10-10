@@ -297,6 +297,9 @@ def help() -> Dict[str, Any]:
         "ce_url": CFG["ce_url"], "engine_url": CFG["engine_url"], "engine_db": CFG["engine_db"],
         "tools": {
             "help": "This description.",
+            "counting_audits(limit=20)": "Manual-count accuracy audits from the engine (counting accuracy programme).",
+            "pos_status()": "Live POS bridge state: bills today, forwarding, CSV inbox.",
+            "capture_rate(hours=24)": "Walk-ins vs passers-by (capture rate) and conversion from the engine.",
             "list_stores(include_inactive=False)": "All CE stores with camera/zone counts, edge device last-seen/version and infra health.",
             "store_kpis(store_id, from_date=None, to_date=None)": "Merged overview+traffic+conversion+demographics+zones+queue+storeops+AI summary for one store (default last 7 days).",
             "compare_stores(from_date=None, to_date=None, include_inactive=False)": "One row per store (footfall, conversion, bounce, dwell, gender, staffExcluded, late openings, SOP breaches, uptime, AI breaches), rankings and flags.",
@@ -1114,6 +1117,40 @@ except ImportError:
     except ImportError:  # smoke tests may import this module without mcp installed
         _Server = None  # type: ignore
 
+def counting_audits(limit: int = 20) -> Dict[str, Any]:
+    """Manual-count accuracy audits recorded on the engine (Settings > Counting accuracy audit)."""
+    notes: List[str] = []
+    rows = engine_try("/api/audits?limit=%d" % limit, notes, []) or []
+    acc = [r["accuracy_in"] for r in rows if r.get("accuracy_in") is not None]
+    if not rows:
+        notes.append("no audits yet: count by hand for 15-30 minutes in the engine's Settings to measure counting accuracy")
+    elif acc and sum(acc) / len(acc) < 95:
+        notes.append("average IN accuracy %.1f%% is below the 95%% leaders quote: check line placement, margin and camera angle" % (sum(acc) / len(acc)))
+    return {"audits": rows, "avg_accuracy_in": round(sum(acc) / len(acc), 1) if acc else None, "notes": notes}
+
+
+def pos_status() -> Dict[str, Any]:
+    """Live POS bridge state on the engine: bills received today, forwarding, CSV inbox, last bills."""
+    notes: List[str] = []
+    st = engine_try("/api/pos/status", notes, {}) or {}
+    bills = engine_try("/api/pos/transactions?hours=24&limit=20", notes, []) or []
+    if st and not st.get("today", {}).get("bills"):
+        notes.append("no bills today: connect the billing software to POST /api/pos/transactions or drop CSV exports into the inbox folder")
+    if st.get("last_error"):
+        notes.append("last error: %s" % st["last_error"])
+    return {"status": st, "last_bills": bills, "notes": notes}
+
+
+def capture_rate(hours: float = 24) -> Dict[str, Any]:
+    """Walk-ins, passers-by and capture rate (needs a 'Pass-by' ENTRY_LINE zone on a street-facing camera), with conversion."""
+    notes: List[str] = []
+    t = engine_try("/api/traffic?hours=%s" % hours, notes, {}) or {}
+    if t and not t.get("passby"):
+        notes.append("no passers-by counted: draw an ENTRY_LINE named 'Pass-by' across the street / mall side in Congruence Eye > Admin > Zones and press Sync now")
+    return {"hours": hours, "walk_ins": t.get("walk_ins"), "passby": t.get("passby"), "capture_rate_pct": t.get("capture_rate_pct"),
+            "conversion_pct": t.get("conversion"), "sales": t.get("sales"), "notes": notes}
+
+
 mcp = _Server("congruence-eye", instructions="Analyse Congruence Eye stores and the local camera engine; call `help` for the tool list.") if _Server else None
 
 if mcp:
@@ -1121,6 +1158,21 @@ if mcp:
     def help_tool() -> dict:
         """Describe all tools of the congruence-eye server, config and conventions."""
         return help()
+
+    @mcp.tool(name="counting_audits")
+    def counting_audits_tool(limit: int = 20) -> dict:
+        """Manual-count accuracy audits recorded on the engine, with the average IN accuracy."""
+        return counting_audits(limit)
+
+    @mcp.tool(name="pos_status")
+    def pos_status_tool() -> dict:
+        """Live POS bridge: bills received today, forwarding to Congruence Eye, CSV inbox state, last bills."""
+        return pos_status()
+
+    @mcp.tool(name="capture_rate")
+    def capture_rate_tool(hours: float = 24) -> dict:
+        """Walk-ins vs passers-by (capture rate) and conversion from the engine for the last N hours."""
+        return capture_rate(hours)
 
     @mcp.tool(name="list_stores")
     def list_stores_tool(include_inactive: bool = False) -> dict:

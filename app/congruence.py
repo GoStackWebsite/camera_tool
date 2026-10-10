@@ -48,6 +48,7 @@ KINDS = {
     "storeops": ("/api/ingest/storeops", "events"),
     "detections": ("/api/ingest/detections", "detections"),
     "heatmap": ("/api/ingest/heatmap", None),
+    "pos": ("/api/pos/transactions", "transactions"),      # live POS bills (the edge key may post them)
 }
 
 
@@ -274,6 +275,19 @@ class CongruenceConnector:
             ev["dwellSec"] = round(max(0.0, min(float(dwell), 7 * 86400)), 1)
         self.spool.put("events", ev)
         self._wake_soon()
+
+    def pos_transactions(self, txs: list[dict]) -> int:
+        """Forward normalised bills (app.pos) to the server's POS endpoint for this store; returns how many were queued."""
+        if not self.configured():
+            return 0
+        sid = ((self.remote or {}).get("store") or {}).get("id")
+        if not sid:
+            return 0
+        from .pos import to_ce
+        for tx in txs:
+            self.spool.put("pos", to_ce(tx, int(sid)))
+        self._wake_soon()
+        return len(txs)
 
     def alert(self, atype: str, message: str, camera_id: str | None, zone: str | None, started: float,
               track_id: int | None = None) -> None:

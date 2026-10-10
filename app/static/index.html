@@ -114,6 +114,7 @@
         <div class="tile"><div class="label">Engaged visits today</div><div class="value" id="kEng">–</div><div class="sub" id="kEngSub"></div></div>
         <div class="tile"><div class="label">Avg dwell today</div><div class="value" id="kDwell">–</div></div>
         <div class="tile"><div class="label">Conversion today</div><div class="value" id="kConv">–</div><div class="sub" id="kConvSub"></div></div>
+        <div class="tile"><div class="label">Capture rate today</div><div class="value" id="kCapture">–</div><div class="sub" id="kCaptureSub">draw a "Pass-by" line in Congruence Eye</div></div>
         <div class="tile"><div class="label">In queue now</div><div class="value" id="kQueue">–</div><div class="sub" id="kQueueSub"></div></div>
         <div class="tile"><div class="label">Open alerts</div><div class="value" id="kAlerts">–</div></div>
         <div class="tile"><div class="label">Store today</div><div class="value" id="kOpen" style="font-size:16px">–</div><div class="sub" id="kOpenSub"></div></div>
@@ -223,7 +224,7 @@
       <div class="card"><h2>Active SOP checks</h2><div id="sopRules"></div></div>
     </div>
     <div class="card mt"><div class="card-head"><h2>Open alerts</h2></div><div id="traxOpen"></div></div>
-    <div class="card mt"><div class="card-head"><h2>Alert history</h2></div><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Camera</th><th>Zone</th><th>Message</th><th>Duration</th><th>Ack</th></tr></thead><tbody id="alertRows"></tbody></table></div></div>
+    <div class="card mt"><div class="card-head"><h2>Alert history</h2></div><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Camera</th><th>Zone</th><th>Message</th><th>Clip</th><th>Duration</th><th>Ack</th></tr></thead><tbody id="alertRows"></tbody></table></div></div>
     <div class="card mt"><div class="card-head"><h2>Camera health (last 24 h)</h2></div><table><thead><tr><th>Camera</th><th>Status</th><th class="num">Uptime</th><th class="num">Outages</th><th class="num">Cam fps</th><th class="num">AI fps</th><th>Last error</th></tr></thead><tbody id="healthRows"></tbody></table></div>
   </section>
 
@@ -279,6 +280,8 @@
       <div class="toolbar"><button class="primary" data-save="demographics">Save demographics</button><span class="hint">Works best on an entrance camera at face height (faces ≥ 40 px). No face images are stored, only the age band and gender of each visit.</span></div></div>
     <div class="card mt"><h2>Notifications</h2>
       <form class="form" id="fNotify">
+        <label>Phone push: ntfy topic (install the ntfy app, subscribe to this topic)<input name="ntfy_topic" placeholder="gogizmo-alerts-7f3a"></label><label>ntfy server<input name="ntfy_url" placeholder="https://ntfy.sh"></label><label>ntfy access token (optional)<input name="ntfy_token" type="password"></label>
+        <label>WhatsApp Cloud API token<input name="whatsapp_token" type="password"></label><label>WhatsApp phone number id<input name="whatsapp_phone_id"></label><label>WhatsApp recipients (comma separated, e.g. 9198xxxxxxx)<input name="whatsapp_to"></label>
         <label>Telegram bot token<input name="telegram_bot_token" type="password"></label><label>Telegram chat id<input name="telegram_chat_id"></label>
         <label class="wide">Webhook URL (POST JSON)<input name="webhook_url" placeholder="https://..."></label>
         <label>SMTP host<input name="smtp_host"></label><label>SMTP port<input name="smtp_port" type="number"></label><label>SMTP user<input name="smtp_user"></label><label>SMTP password<input name="smtp_password" type="password"></label>
@@ -286,6 +289,22 @@
         <label class="wide">Alert types to send<div id="notifyTypes" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px"></div></label>
       </form>
       <div class="toolbar"><button class="primary" data-save="notifications">Save notifications</button><button id="btnTestNotify">Send test</button><span class="hint" id="notifyResult"></span></div></div>
+    <div class="card mt"><h2>Counting accuracy audit</h2>
+      <div class="hint">Count people by hand for 15-30 minutes while the engine counts: start, count, then enter your numbers. The result is kept per camera and shown to the chain in Congruence Eye's MCP reports.</div>
+      <form class="form mt" id="fAudit" onsubmit="return false">
+        <label>Camera<select name="camera_id" id="auditCam"></select></label>
+        <label>Manual IN count<input name="manual_in" type="number" min="0" step="1"></label><label>Manual OUT count (optional)<input name="manual_out" type="number" min="0" step="1"></label>
+        <label class="wide">Note<input name="note" placeholder="e.g. evening peak, door 1"></label>
+      </form>
+      <div class="toolbar"><button id="btnAuditStart">Start audit</button><button class="primary" id="btnAuditFinish" disabled>Finish and compare</button><span class="hint" id="auditLive"></span></div>
+      <div class="scroll mt"><table><thead><tr><th>When</th><th>Camera</th><th>Window</th><th>Manual in / out</th><th>Engine in / out</th><th>Accuracy in</th><th>Accuracy out</th><th>Note</th></tr></thead><tbody id="auditRows"></tbody></table></div></div>
+    <div class="card mt"><h2>POS integration (live bills)</h2>
+      <div class="hint">Point the billing software at <code id="posUrl"></code> (POST JSON: a bill, a list, or {"transactions": [...]}; fields billNo, ts, amount, itemsCount, staffCode or common aliases), or drop CSV exports into <code id="posInbox"></code>. Bills feed the conversion tiles here and are forwarded to Congruence Eye.</div>
+      <form class="form mt" id="fPos" onsubmit="return false">
+        <label class="check"><input name="forward" type="checkbox">Forward bills to Congruence Eye</label>
+        <label class="check"><input name="inbox_enabled" type="checkbox">Watch the CSV drop folder (every 30 s)</label>
+      </form>
+      <div class="toolbar"><button class="primary" data-save="pos">Save POS settings</button><button id="btnPosScan">Scan folder now</button><span class="hint" id="posStatus"></span></div></div>
     <div class="card mt"><h2>Congruence Eye</h2>
       <form class="form" id="fCE" onsubmit="return false">
         <label class="check"><input name="enabled" type="checkbox">Send this store's analytics to Congruence Eye (this PC acts as the store's edge box)</label>
@@ -600,7 +619,8 @@
     $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` : 'no line crossings yet: counting visits';
     $('#kEng').textContent = t.engaged_pct + '%'; $('#kEngSub').textContent = `${t.engaged} engaged · ${t.bounced} bounced`;
     $('#kDwell').textContent = t.avg_dwell ? fmtDur(t.avg_dwell) : '–';
-    $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings' : `${t.sales.bills} bills`;
+    $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings or connect the POS' : `${t.sales.bills} bills`;
+    $('#kCapture').textContent = t.capture_rate_pct == null ? '–' : t.capture_rate_pct + '%'; $('#kCaptureSub').textContent = t.passby ? `${t.walk_ins} walk-ins of ${t.passby} passers-by` : 'draw a "Pass-by" line in Congruence Eye';
   }
   function renderTraffic(t) {
     const f = $('#funnel'); f.innerHTML = ''; const max = Math.max(1, t.walk_ins, t.visits);
@@ -691,8 +711,8 @@
      [true, 'Camera offline > 1 min', ''], [true, `Store open/close vs ${CFG.store.open_time}–${CFG.store.close_time} (+${CFG.store.grace_minutes} min grace)`, '']]
       .forEach(([on, label, fix]) => { const row = document.createElement('div'); row.className = 'ev'; row.style.gridTemplateColumns = 'auto 1fr'; text(row, 'span', on ? 'ON' : 'OFF', 'chip ' + (on ? 'good' : '')); text(row, 'span', label + (on || !fix ? '' : ` — ${fix}`)); rules.appendChild(row); });
     const tb = $('#alertRows'); tb.innerHTML = '';
-    if (!hist.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No alerts in this period', 'hint'); td.colSpan = 7; tb.appendChild(tr); }
-    for (const a of hist) { const tr = document.createElement('tr'); text(tr, 'td', fmtDT(a.started)); const td = document.createElement('td'); text(td, 'span', ALERT_LABEL[a.type] || a.type, 'chip ' + (ALERT_CLS[a.type] || '')); tr.appendChild(td); text(tr, 'td', a.camera || ''); text(tr, 'td', a.zone || ''); text(tr, 'td', a.message); text(tr, 'td', a.resolved ? fmtDur(a.resolved - a.started) : 'open'); text(tr, 'td', a.acked ? 'yes' : ''); tb.appendChild(tr); }
+    if (!hist.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No alerts in this period', 'hint'); td.colSpan = 8; tb.appendChild(tr); }
+    for (const a of hist) { const tr = document.createElement('tr'); text(tr, 'td', fmtDT(a.started)); const td = document.createElement('td'); text(td, 'span', ALERT_LABEL[a.type] || a.type, 'chip ' + (ALERT_CLS[a.type] || '')); tr.appendChild(td); text(tr, 'td', a.camera || ''); text(tr, 'td', a.zone || ''); text(tr, 'td', a.message); const tc = document.createElement('td'); if (a.clip) { const l = document.createElement('a'); l.href = '/clips/' + a.clip; l.target = '_blank'; l.textContent = 'play'; tc.appendChild(l); } tr.appendChild(tc); text(tr, 'td', a.resolved ? fmtDur(a.resolved - a.started) : 'open'); text(tr, 'td', a.acked ? 'yes' : ''); tb.appendChild(tr); }
     const hb = $('#healthRows'); hb.innerHTML = '';
     for (const h of health.cameras) { const tr = document.createElement('tr'); text(tr, 'td', h.name); const td = document.createElement('td'); text(td, 'span', !h.enabled ? 'disabled' : h.connected ? 'online' : 'offline', 'chip ' + (!h.enabled ? '' : h.connected ? 'good' : 'crit')); tr.appendChild(td); text(tr, 'td', h.uptime_pct + '%', 'num'); text(tr, 'td', h.outages, 'num'); text(tr, 'td', h.fps, 'num'); text(tr, 'td', h.inference_fps, 'num'); text(tr, 'td', h.error || ''); hb.appendChild(tr); }
     if (S) renderOpenAlerts(S.open_alerts, $('#traxOpen'), true);
@@ -701,7 +721,32 @@
   // ------------------------------------------------------------ settings
   const formToObj = f => { const o = {}; for (const i of f.querySelectorAll('input,select')) { if (!i.name) continue; o[i.name] = i.type === 'checkbox' ? i.checked : i.type === 'number' ? (i.value === '' ? 0 : +i.value) : i.value; } return o; };
   const fillForm = (f, obj) => { for (const i of f.querySelectorAll('input,select')) { if (!(i.name in obj)) continue; if (i.type === 'checkbox') i.checked = !!obj[i.name]; else i.value = obj[i.name] ?? ''; } };
+  let auditStart = null, auditTimer = null;
+  function renderAuditCard() {
+    const sel = $('#auditCam'); const cur = sel.value; sel.innerHTML = '';
+    for (const c of CFG.cameras) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name + (c.line ? '' : ' (no count line)'); sel.appendChild(o); }
+    if (cur) sel.value = cur;
+    renderAudits();
+  }
+  async function renderAudits() {
+    const tb = $('#auditRows'); if (!tb) return; tb.innerHTML = '';
+    let rows = []; try { rows = await api('/api/audits'); } catch (e) { return; }
+    if (!rows.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No audits yet.', 'hint'); td.colSpan = 8; tb.appendChild(tr); return; }
+    for (const a of rows) { const tr = document.createElement('tr'); text(tr, 'td', fmtDT(a.created)); text(tr, 'td', a.camera); text(tr, 'td', `${fmtClock(a.start_ts)} – ${fmtClock(a.end_ts)}`); text(tr, 'td', `${a.manual_in} / ${a.manual_out == null ? '–' : a.manual_out}`); text(tr, 'td', `${a.engine_in} / ${a.engine_out}`); const ti = text(tr, 'td', a.accuracy_in + '%'); ti.style.fontWeight = '600'; ti.style.color = a.accuracy_in >= 95 ? 'var(--good, #2a7)' : a.accuracy_in >= 85 ? 'var(--warn, #c80)' : 'var(--crit, #d33)'; text(tr, 'td', a.accuracy_out == null ? '–' : a.accuracy_out + '%'); text(tr, 'td', a.note || ''); tb.appendChild(tr); }
+  }
+  $('#btnAuditStart').onclick = () => { auditStart = Date.now() / 1000; $('#btnAuditFinish').disabled = false; $('#btnAuditStart').disabled = true; $('#auditLive').textContent = 'Counting… engine: 0 in / 0 out';
+    auditTimer = setInterval(async () => { try { const r = await api(`/api/audits/live?camera_id=${encodeURIComponent($('#auditCam').value)}&since=${auditStart}`); $('#auditLive').textContent = `Counting for ${fmtDur(r.now - r.since)} · engine: ${r.in} in / ${r.out} out`; } catch (e) {} }, 5000); };
+  $('#btnAuditFinish').onclick = async () => { const o = formToObj($('#fAudit')); if (o.manual_in === '' || o.manual_in == null) { toast('Enter your manual IN count'); return; }
+    const body = {camera_id: o.camera_id, start: auditStart, end: Date.now() / 1000, manual_in: +o.manual_in, note: o.note || null}; if (o.manual_out !== '' && o.manual_out != null) body.manual_out = +o.manual_out;
+    try { const a = await api('/api/audits', 'POST', body); toast(`Accuracy IN ${a.accuracy_in}% (engine ${a.engine_in}, manual ${a.manual_in})`); } catch (e) { toast('Audit failed: ' + e.message); return; }
+    clearInterval(auditTimer); auditStart = null; $('#btnAuditFinish').disabled = true; $('#btnAuditStart').disabled = false; $('#auditLive').textContent = ''; renderAudits(); };
+  async function renderPosStatus() {
+    $('#posUrl').textContent = `${location.origin}/api/pos/transactions`;
+    try { const st = await api('/api/pos/status'); $('#posInbox').textContent = st.inbox; const t = st.today; $('#posStatus').textContent = `Today: ${t.bills} bills, ₹${t.revenue}${t.last_ts ? ', last ' + fmtClock(t.last_ts) : ''} · received ${st.received}, forwarded ${st.forwarded}` + (st.last_error ? ` · error: ${st.last_error}` : '') + (st.last_file ? ` · ${st.last_file}` : ''); } catch (e) {}
+  }
+  $('#btnPosScan').onclick = async () => { try { const r = await api('/api/pos/scan', 'POST'); toast(`Processed ${r.bills} bill(s)`); renderPosStatus(); } catch (e) { toast('Scan failed: ' + e.message); } };
   function renderSettings() {
+    fillForm($('#fPos'), CFG.pos || {}); renderAuditCard(); renderPosStatus();
     fillForm($('#fStore'), CFG.store); fillForm($('#fThr'), CFG.thresholds); fillForm($('#fNotify'), CFG.notifications); fillForm($('#fReport'), CFG.report); fillForm($('#fDemo'), CFG.demographics || {}); fillForm($('#fStaff'), CFG.staff || {}); renderUniforms(); renderCE();
     const nt = $('#notifyTypes'); nt.innerHTML = ''; Object.entries(ALERT_LABEL).forEach(([k, l]) => { const lab = document.createElement('label'); lab.className = 'check'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = k; cb.checked = (CFG.notifications.types || []).includes(k); lab.appendChild(cb); lab.append(' ' + l); nt.appendChild(lab); });
     if (!$('#fSales input[name=date]').value) $('#fSales input[name=date]').value = new Date().toISOString().slice(0, 10);
@@ -720,7 +765,8 @@
   $('#btnTestCam').onclick = async () => { const o = formToObj($('#fCam')); $('#camTestResult').textContent = 'Testing… (up to 10 s)'; try { const r = await api('/api/cameras/test', 'POST', {url: o.url, user: o.user, password: o.password}); $('#camTestResult').textContent = r.ok ? `OK: ${r.width}×${r.height} @ ${r.fps} fps` : 'Failed: ' + r.error; } catch (e) { $('#camTestResult').textContent = 'Failed: ' + e.message; } };
   $('#fCam').onsubmit = async e => { e.preventDefault(); const o = formToObj($('#fCam')); if (!o.id) delete o.id; try { if (editingCam) await api(`/api/cameras/${editingCam}`, 'PUT', o); else await api('/api/cameras', 'POST', o); toast('Camera saved, starting…'); $('#fCam').style.display = 'none'; await loadConfig(); renderCamRows(); } catch (err) { toast('Save failed: ' + err.message); } };
   document.addEventListener('click', async e => {
-    const b = e.target.closest('[data-save]'); if (!b) return; const what = b.dataset.save; const f = {store: '#fStore', thresholds: '#fThr', notifications: '#fNotify', report: '#fReport', demographics: '#fDemo', staff: '#fStaff'}[what]; const o = formToObj($(f));
+    const b = e.target.closest('[data-save]'); if (!b) return; const what = b.dataset.save; const f = {store: '#fStore', thresholds: '#fThr', notifications: '#fNotify', report: '#fReport', demographics: '#fDemo', staff: '#fStaff', pos: '#fPos'}[what]; const o = formToObj($(f));
+    if (what === 'pos') { o.forward = $('#fPos [name=forward]').checked; o.inbox_enabled = $('#fPos [name=inbox_enabled]').checked; }
     if (what === 'staff') o.uniforms = (CFG.staff && CFG.staff.uniforms) || [];
     if (what === 'notifications') o.types = $$('#notifyTypes input:checked').map(i => i.value);
     try { await api(`/api/config/${what}`, 'PUT', o); toast('Saved'); await loadConfig(); } catch (err) { toast('Save failed: ' + err.message); }

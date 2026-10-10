@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS queue_minutes (
     camera_id TEXT NOT NULL, zone TEXT NOT NULL, ts INTEGER NOT NULL, avg_len REAL NOT NULL, max_len INTEGER NOT NULL,
     avg_wait REAL NOT NULL, max_wait REAL NOT NULL, PRIMARY KEY (camera_id, zone, ts));
 CREATE TABLE IF NOT EXISTS daily_store (date TEXT PRIMARY KEY, opened_at REAL, closed_at REAL);
+CREATE TABLE IF NOT EXISTS audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, camera_id TEXT NOT NULL, start_ts REAL NOT NULL, end_ts REAL NOT NULL,
+    manual_in INTEGER NOT NULL, manual_out INTEGER, engine_in INTEGER NOT NULL, engine_out INTEGER NOT NULL,
+    accuracy_in REAL NOT NULL, accuracy_out REAL, note TEXT, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS transactions (
+    bill_no TEXT PRIMARY KEY, ts REAL NOT NULL, amount REAL NOT NULL, items INTEGER NOT NULL, staff_code TEXT,
+    source TEXT, received REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_transactions_ts ON transactions(ts);
 """
 
 
@@ -63,6 +71,8 @@ class Store:
             for col, typ in (("gender", "TEXT"), ("age", "INTEGER"), ("age_band", "TEXT")):
                 if col not in cols:
                     self.conn.execute(f"ALTER TABLE visits ADD COLUMN {col} {typ}")
+            if "clip" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(alerts)")}:
+                self.conn.execute("ALTER TABLE alerts ADD COLUMN clip TEXT")
             self.conn.commit()
 
     def _exec(self, sql: str, params: tuple = ()) -> int | None:
@@ -104,6 +114,51 @@ class Store:
     def add_alert(self, a: dict) -> int:
         return self._exec("INSERT INTO alerts(key, camera_id, type, zone, track_id, message, started) VALUES (?,?,?,?,?,?,?)",
                           (a["key"], a.get("camera_id"), a["type"], a.get("zone"), a.get("track_id"), a["message"], a["started"])) or 0
+
+    def set_alert_clip(self, alert_id: int, clip: str) -> None:
+        self._exec("UPDATE alerts SET clip = ? WHERE id = ?", (clip, alert_id))
+
+    # ---- counting accuracy audits ---------------------------------------------
+    def crossing_counts(self, camera_id: str, since: float, until: float) -> dict:
+        out = {"in": 0, "out": 0, "pass": 0, "staff_in": 0}
+        for r in self._rows("SELECT direction, is_staff, COUNT(*) AS n FROM crossings WHERE camera_id = ? AND ts >= ? AND ts < ? GROUP BY 1, 2",
+                            (camera_id, since, until)):
+            if r["direction"] == "in" and r["is_staff"]:
+                out["staff_in"] += r["n"]
+            out[r["direction"]] = out.get(r["direction"], 0) + r["n"]
+        return out
+
+    def add_audit(self, a: dict) -> int:
+        return self._exec("INSERT INTO audits(camera_id, start_ts, end_ts, manual_in, manual_out, engine_in, engine_out, accuracy_in, accuracy_out, note, created)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                          (a["camera_id"], a["start_ts"], a["end_ts"], a["manual_in"], a.get("manual_out"), a["engine_in"], a["engine_out"],
+                           a["accuracy_in"], a.get("accuracy_out"), a.get("note"), time.time())) or 0
+
+    def audits(self, limit: int = 50) -> list[dict]:
+        return self._rows("SELECT * FROM audits ORDER BY created DESC LIMIT ?", (limit,))
+
+    # ---- POS bills ------------------------------------------------------------
+    def add_transactions(self, txs: list[dict], source: str) -> None:
+        now = time.time()
+        days = set()
+        with self.lock:
+            for t in txs:
+                self.conn.execute("INSERT OR REPLACE INTO transactions(bill_no, ts, amount, items, staff_code, source, received) VALUES (?,?,?,?,?,?,?)",
+                                  (t["bill_no"], t["ts"], t["amount"], t["items"], t.get("staff_code"), source, now))
+                days.add(datetime.fromtimestamp(t["ts"]).strftime("%Y-%m-%d"))
+            for day in days:                       # the daily sales row (conversion) follows the live bills
+                d0 = datetime.strptime(day, "%Y-%m-%d").timestamp()
+                row = self.conn.execute("SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS rev FROM transactions WHERE ts >= ? AND ts < ?", (d0, d0 + 86400)).fetchone()
+                self.conn.execute("INSERT OR REPLACE INTO sales(date, bills, revenue) VALUES (?,?,?)", (day, int(row["n"]), float(row["rev"])))
+            self.conn.commit()
+
+    def transactions(self, since: float, until: float, limit: int = 500) -> list[dict]:
+        return self._rows("SELECT * FROM transactions WHERE ts >= ? AND ts < ? ORDER BY ts DESC LIMIT ?", (since, until, limit))
+
+    def transactions_summary(self, now: float) -> dict:
+        d0 = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        r = self._rows("SELECT COUNT(*) AS bills, COALESCE(SUM(amount), 0) AS revenue, COALESCE(SUM(items), 0) AS items, MAX(ts) AS last_ts FROM transactions WHERE ts >= ?", (d0,))[0]
+        return {"bills": int(r["bills"]), "revenue": round(float(r["revenue"]), 2), "items": int(r["items"]), "last_ts": r["last_ts"]}
 
     def resolve_alert(self, alert_id: int, ts: float) -> None:
         self._exec("UPDATE alerts SET resolved=? WHERE id=? AND resolved IS NULL", (ts, alert_id))
@@ -198,7 +253,8 @@ class Store:
                                f" WHERE ts >= ? AND ts < ? AND is_staff = 0{cam_sql}", (since, until) + cam_p)
         ins = [c for c in crossings if c["direction"] == "in"]
         outs = [c for c in crossings if c["direction"] == "out"]
-        has_line = bool(crossings)
+        passes = [c for c in crossings if c["direction"] == "pass"]
+        has_line = bool(ins or outs)
         walk_ins = len(ins) if has_line else len(visits)
         groups = len({c["group_id"] for c in ins}) if has_line else len({v["group_id"] or f"v{i}" for i, v in enumerate(visits)})
         engaged = sum(1 for v in visits if v["engaged"])
@@ -234,7 +290,7 @@ class Store:
         conversion = round(sales["bills"] / walk_ins * 100, 1) if walk_ins and sales["bills"] else None
         return {
             "since": since, "until": until, "has_line": has_line,
-            "walk_ins": walk_ins, "groups": groups, "exits": len(outs),
+            "walk_ins": walk_ins, "passby": len(passes), "capture_rate_pct": round(100.0 * walk_ins / len(passes), 1) if passes else None, "groups": groups, "exits": len(outs),
             "visits": len(visits), "engaged": engaged, "bounced": bounced,
             "engaged_pct": round(engaged / len(visits) * 100, 1) if visits else 0.0,
             "avg_dwell": round(avg_dwell, 1),

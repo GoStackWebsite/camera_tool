@@ -32,6 +32,8 @@ class AlertManager:
         self.open_alerts: dict[str, dict] = {}
         self.cooldown: dict[str, float] = {}
         self.listener = None     # Congruence Eye hook: (type, message, camera_id, zone, started, track_id)
+        self.clipper = None      # app.clips.ClipRecorder: evidence clip around every alert with a camera
+        self.base_url = ""       # public URL of this engine, for clip links in notifications and detections
         for a in store.open_alerts():       # survive restarts
             self.open_alerts[a["key"]] = a
 
@@ -47,15 +49,31 @@ class AlertManager:
                  "message": message, "started": now, "resolved": None, "acked": 0}
             a["id"] = self.store.add_alert(a)
             self.open_alerts[key] = a
-        self._emit(a)
-        self.notifier.send(TITLES.get(atype, atype), message, atype)
+        link = self._clip(a)
+        self._emit(a, link)
+        self.notifier.send(TITLES.get(atype, atype), message, atype, link)
         return True
 
-    def _emit(self, a: dict) -> None:
+    def _clip(self, a: dict) -> str | None:
+        """Ask the recorder for an evidence clip; returns its public link (the file appears a few seconds later)."""
+        if self.clipper is None or not a.get("camera_id"):
+            return None
+        try:
+            name = self.clipper.request(a)
+        except Exception:
+            log.exception("clip request failed")
+            return None
+        if not name:
+            return None
+        a["clip"] = name
+        return f"{self.base_url.rstrip('/')}/clips/{name}" if self.base_url else f"/clips/{name}"
+
+    def _emit(self, a: dict, link: str | None = None) -> None:
         if self.listener is None:
             return
         try:
-            self.listener(a["type"], a["message"], a.get("camera_id"), a.get("zone"), a["started"], a.get("track_id"))
+            msg = a["message"] + (f" Clip: {link}" if link else "")
+            self.listener(a["type"], msg, a.get("camera_id"), a.get("zone"), a["started"], a.get("track_id"))
         except Exception:
             log.exception("alert listener failed")
 
@@ -78,9 +96,11 @@ class AlertManager:
         a = {"key": key, "camera_id": camera_id, "type": atype, "zone": zone, "track_id": track_id,
              "message": message, "started": now}
         aid = self.store.add_alert(a)
+        a["id"] = aid
         self.store.resolve_alert(aid, now)
-        self._emit(a)
-        self.notifier.send(TITLES.get(atype, atype), message, atype)
+        link = self._clip(a)
+        self._emit(a, link)
+        self.notifier.send(TITLES.get(atype, atype), message, atype, link)
         return True
 
     def resolve_prefix(self, prefix: str) -> None:

@@ -25,18 +25,18 @@ The pattern: everyone sells (a) counting you can trust, (b) staff exclusion, (c)
 |---|---|---|---|
 | Entrance counting (in/out) | 95-99 % with stereo sensors | virtual line on CCTV, segment-bounded, debounce; e2e verified server side (32/32 checks) | accuracy audit per store not yet measured; needs a manual-count calibration tool |
 | Staff exclusion | tags (RetailNext), clothing AI (V-Count, Tango) | **learned uniform classifier** (new today, 88-94 % on held-out frames) + staff zones + long-presence rule + manual tag | model is per uniform; cross-chain needs the training tool (shipped) |
-| Pass-by traffic / capture rate | RetailNext, V-Count, ShopperTrak | not available | needs an outward camera + PASS_BY line type on server and engine |
+| Pass-by traffic / capture rate | RetailNext, V-Count, ShopperTrak | **engine**: a second ENTRY_LINE named "Pass-by" drawn in Congruence Eye becomes the street line; passers-by and capture rate on the Live tiles, `/api/traffic`, MCP `capture_rate` | KPI not yet on the Congruence Eye dashboard (needs a server build: PASS_BY event type + hourly metric) |
 | Demographics (age, gender) | V-Count, Tango, RetailNext | face-based, anonymous, engine → server | accuracy unmeasured; faces rare at ceiling-camera angles (5 of 155 crops had a face) |
 | Dwell, engaged vs bounced, zones, journey | all | zones (SECTION/QUEUE/STAFF_ONLY/SHELF), engaged %, bounce, journey, heatmap | shelf (SHELF) analytics is a zone only, no product-level interaction |
 | Queue management | V-Count, Staqu, Tango | queue zones, wait time, unattended counter alerts | no predictive "open another counter" alert |
 | Groups vs individuals | Tango, RetailNext | group detection at the line, billable entities | – |
 | Store ops compliance | Tango StoreOps, Wobot | open/close, SOP breaches, mobile usage, unattended customer, checklists, tasks, tickets | **evidence snapshot on detections** (added today in the engine), hygiene/uniform rules exist server side but the engine does not emit them |
-| Conversion & POS | RetailNext, ShopperTrak, V-Count | POS module, conversion funnel, ATV, missed opportunities | no live POS integration (CSV / API import only) |
+| Conversion & POS | RetailNext, ShopperTrak, V-Count | **live POS bridge in the engine**: webhook `POST /api/pos/transactions` (any common field names), CSV drop folder; bills feed conversion locally and are forwarded to the server's POS API with the edge key | adapters for specific POS products (Ginesys, GoFrugal, Zoho) are configuration on their side |
 | Labour / STAR | ShopperTrak, RetailNext | customersPerStaff per hour, staffPresentAvg | no schedule import, no staffing recommendation |
 | Multi-store benchmark | all | benchmark by region/format/city, infra health, uptime | no external market index |
-| Alerts & mobile | all have native apps | PWA (installable), email flag, Telegram/webhook/email from the engine | no push notifications, no WhatsApp |
-| Loss prevention | RetailNext | loitering, running, lights-off, camera tamper | no sweep/concealment detection, no case files |
-| Accuracy / audit tooling | vendors audit manually | e2e replay test, capture scan, training tool (all new) | no in-app "validate against manual count" workflow |
+| Alerts & mobile | all have native apps | PWA (installable); engine alerts by **phone push (ntfy)**, **WhatsApp Cloud API**, Telegram, webhook, e-mail, each with the evidence-clip link | no native store app yet (PWA wrap pending) |
+| Loss prevention | RetailNext | loitering, running, lights-off, camera tamper; **evidence clip (10 s before / 8 s after) for every alert**, linked from the alert, the notification and the server detection | no sweep/concealment detection, no case export |
+| Accuracy / audit tooling | vendors audit manually | **counting accuracy audit** in Settings (start, count by hand, compare: accuracy % per camera kept and exposed to the MCP), e2e replay tests, capture scan, training tool | per-store accuracy not yet shown on the Congruence Eye dashboard |
 | Data privacy | anonymised counting, no video stored | faces blurred on upload, no video stored, demographics aggregate | document it for customers (GDPR/DPDP) |
 | Open API / MCP | vendors: REST, some webhooks | REST + **MCP server for cross-store analysis** (new) | webhooks out of the server not yet |
 
@@ -50,24 +50,28 @@ The pattern: everyone sells (a) counting you can trust, (b) staff exclusion, (c)
 | walk-ins 23 vs engine 123 | server counts every ENTRY it receives (verified); the engine logged crossings the server never got; the connector ignored per-event rejections | connector now counts and logs rejected events (see `rejected` in its status) | root cause visible next time it happens |
 | "not market ready" | see table above | MCP server, e2e test, training tool, evidence snapshots | roadmap below |
 
-## 4. Roadmap to market-ready (priority order)
+## 4. Built on 2026-10-10 and tested end to end (`tools/e2e_features.py`)
 
-1. **Counting accuracy programme** (weeks 1-2): per-store manual-count calibration tool in the engine
-   (count 30 min by hand, compare, auto-tune line margin), report accuracy % in Infra health. Leaders
-   sell this number first.
-2. **Pass-by & capture rate** (week 2): PASS_BY zone type (server), outward camera line (engine),
-   capture-rate KPI on the dashboard.
-3. **Staff model lifecycle** (week 2): labelling screen in the engine UI (click a person → staff/customer),
-   `train_staff_model` from the MCP, model versioning per chain; attendance (first/last seen per staff
-   uniform per day) and service time (staff near customer in a zone).
-4. **Push notifications + WhatsApp** (week 3): web push from the PWA, WhatsApp Business API for SOP breaches
-   and camera downtime; alert routing per role.
-5. **POS live integration** (weeks 3-4): REST/webhook ingest from common Indian POS (Ginesys, GoFrugal,
-   Zoho), hourly conversion and ATV with STAR.
-6. **Loss prevention pack** (weeks 4-6): sweep/concealment heuristics, after-hours presence, evidence
-   clips (10 s before/after) instead of a snapshot, case export.
-7. **Native mobile shell** (week 6): wrap the PWA (Capacitor) for App Store / Play Store presence with push.
-8. **Benchmark index**: anonymised cross-tenant traffic index once there are enough stores.
+| Feature | Where | Test |
+|---|---|---|
+| Phone push + WhatsApp alerts | engine notifier (ntfy, Meta Cloud API) | mock server receives the topic POST and two Cloud-API messages with bearer token |
+| Live POS | engine `POST /api/pos/transactions`, CSV inbox, forward to the server | bills in three shapes accepted, CSV imported, conversion computed, server accepts the forwarded format and shows the transactions |
+| Counting accuracy audit | engine `/api/audits`, Settings card | audit against a recorded hour: 100 % in / 95.8 % out as designed |
+| Pass-by line + capture rate | server zone "Pass-by" -> engine `passby_line` | zone created on the server reaches the engine, count line untouched, removed again |
+| Evidence clips | engine ring buffer + `data/clips`, links everywhere | recorded shop video replayed through the first camera until an alert produced an MP4 |
+
+## 4b. Roadmap, remaining (priority order)
+
+1. **Server-side KPIs** (needs a Congruence Eye build): PASS_BY event type + hourly passers-by and capture
+   rate on the dashboard; counting-accuracy % per store in Infra health; clip links on detections as a
+   first-class field.
+2. **Staff model lifecycle**: labelling screen in the engine UI (click a person -> staff/customer), model
+   versioning per chain; attendance (first/last seen per staff uniform per day) and service time.
+3. **Alert routing per role** and web push inside the PWA (ntfy covers phones today).
+4. **POS adapters** for the common Indian products (Ginesys, GoFrugal, Zoho) on top of the generic webhook.
+5. **Loss prevention pack**: sweep/concealment heuristics, after-hours presence, case export of clips.
+6. **Native mobile shell** (Capacitor) for store presence with push.
+7. **Benchmark index**: anonymised cross-tenant traffic index once there are enough stores.
 
 ## 5. Sources
 

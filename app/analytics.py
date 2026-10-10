@@ -131,6 +131,11 @@ class Track:
     pending_side: int = 0                           # opposite side seen while a crossing is being confirmed
     pending_n: int = 0
     last_cross_ts: float = 0.0
+    pb_side: int = 0                                # pass-by line: side of the last clear observation
+    pb_pt: tuple | None = None
+    pb_pending: int = 0
+    pb_n: int = 0
+    pb_counted: bool = False                        # a track is one passer-by however often it wanders over the line
     loitering: bool = False
     run_alerted: bool = False
     path_len: float = 0.0
@@ -191,6 +196,7 @@ class Analytics:
         self._last_series_ts = 0.0
         self._recent_ins: deque = deque(maxlen=50)      # (ts, fx, fy, group_id)
         self._zone_state: dict[str, dict] = {}
+        self.passby = 0                               # people who crossed the pass-by (street) line today
         self.cfg_rev = 0
         self.ce_heat = np.zeros((18, 32), np.int32)   # per-window foot-point counts for Congruence Eye
         self.emitter = None                           # Congruence Eye connector (attached by the connector)
@@ -207,6 +213,7 @@ class Analytics:
             self.events: deque = deque(maxlen=500)
             self.entries = 0
             self.exits = 0
+            self.passby = 0
             self.groups_in = 0
             self.unique_ids: set[int] = set(self.tracks.keys())
             self.peak = 0
@@ -318,6 +325,8 @@ class Analytics:
                     self._sample_torso(t, frame, now)
                 self._update_motion(t, now, aspect)
                 self._update_line(t, now, fx, fy)
+                if self.cam.passby_line:
+                    self._update_passby(t, now, fx, fy)
                 self._update_zones(t, now, fx, fy, dt)
                 self._heat_add(fx, fy)
                 self.ce_heat[min(17, max(0, int(fy * 18))), min(31, max(0, int(fx * 32)))] += 1
@@ -387,6 +396,9 @@ class Analytics:
                 "unique": len(self.unique_ids),
                 "entries": self.entries,
                 "exits": self.exits,
+                "passby": self.passby,
+                "capture_rate_pct": round(100.0 * self.entries / self.passby, 1) if self.passby else None,
+                "has_passby": bool(self.cam.passby_line),
                 "groups_in": self.groups_in,
                 "loitering": sum(1 for t in customers if t.loitering),
                 "phones": sum(1 for t in active if t.phone_since),
@@ -470,6 +482,43 @@ class Analytics:
                 self.alerts.fire(f"loiter:{self.cam.id}:{t.id}", "loiter",
                                  f"{self.cam.name}: visitor #{t.id} lingering for {t.dwell(now) / 60:.0f} min",
                                  self.cam.id, None, t.id)
+
+    def _update_passby(self, t: Track, now: float, fx: float, fy: float) -> None:
+        """Count a track once when it crosses the pass-by line (either direction, inside the drawn segment).
+        Capture rate = walk-ins / passers-by."""
+        if t.pb_counted:
+            return
+        (ax, ay), (bx, by) = self.cam.passby_line
+        dx, dy = bx - ax, by - ay
+        cross = dx * (fy - ay) - dy * (fx - ax)
+        if abs(cross) / (math.hypot(dx, dy) or 1e-9) < self.thr.line_margin:
+            return
+        s = 1 if cross > 0 else -1
+        if t.pb_side == 0:
+            t.pb_side, t.pb_pt = s, (fx, fy)
+            return
+        if s == t.pb_side:
+            t.pb_pt, t.pb_pending, t.pb_n = (fx, fy), 0, 0
+            return
+        if t.pb_pending != s:
+            t.pb_pending, t.pb_n = s, 0
+        t.pb_n += 1
+        if t.pb_n < max(1, int(self.thr.line_min_frames)):
+            return
+        px, py = t.pb_pt or (fx, fy)
+        c0 = dx * (py - ay) - dy * (px - ax)
+        c1 = cross
+        ta = c0 / (c0 - c1) if (c0 - c1) else 0.0
+        qx, qy = px + ta * (fx - px), py + ta * (fy - py)
+        u = ((qx - ax) * dx + (qy - ay) * dy) / ((dx * dx + dy * dy) or 1e-12)
+        t.pb_side, t.pb_pt, t.pb_pending, t.pb_n = s, (fx, fy), 0, 0
+        if -0.1 <= u <= 1.1:
+            t.pb_counted = True
+            self.passby += 1
+            self._event(now, "pass_by", t.id, f"Person #{t.id} passed by")
+            if self.store:
+                self.store.add_crossing({"camera_id": self.cam.id, "ts": now, "direction": "pass", "track_id": t.id,
+                                         "group_id": t.group_id, "is_staff": t.is_staff})
 
     def _observe_line(self, fx: float, fy: float) -> int:
         """Side of the count line a foot point is on: +1 (IN side), -1 (OUT side), or 0 when it is within

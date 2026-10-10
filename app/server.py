@@ -12,6 +12,7 @@ from datetime import date, datetime
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import socket
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -26,8 +27,10 @@ from .store import Store, day_bounds
 log = logging.getLogger("server")
 
 
-from .config import CongruenceConfig, DATA_DIR
+from .config import CongruenceConfig, DATA_DIR, PosConfig
+from .clips import ClipRecorder
 from .congruence import CongruenceConnector, fetch_config, summarise_config
+from .pos import PosService
 from .sync import Reconciler
 
 
@@ -59,6 +62,12 @@ async def lifespan(_: FastAPI):
     rt.reconciler = Reconciler(rt.config_store, rt.manager, rt.store, rt.connector)
     rt.connector.reconciler = rt.reconciler
     rt.manager.reconciler = rt.reconciler
+    rt.clips = ClipRecorder(DATA_DIR / "clips", rt.manager, rt.store)      # evidence clips around alerts
+    rt.alerts.clipper = rt.clips
+    rt.alerts.base_url = f"http://{socket.gethostname()}:{settings.port}"
+    rt.pos = PosService(rt.store, rt.connector, DATA_DIR / "pos_inbox")   # live POS bills -> conversion + server
+    if rt.config_store.config.pos.inbox_enabled:
+        rt.pos.start()
     rt.reconciler.start()
     rt.connector.start()
     log.info("Dashboard ready at http://localhost:%d (%d camera(s))", settings.port, len(rt.manager.runtimes))
@@ -66,6 +75,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         rt.reconciler.stop()
+        rt.pos.stop()
         rt.connector.stop()
         rt.manager.stop()
         rt.store.close()
@@ -73,6 +83,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Retail Camera Analytics", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+(DATA_DIR / "clips").mkdir(parents=True, exist_ok=True)
+app.mount("/clips", StaticFiles(directory=str(DATA_DIR / "clips")), name="clips")
 
 
 # ---------------------------------------------------------------- helpers
@@ -447,6 +459,103 @@ async def put_congruence(body: dict):
 @app.post("/api/notifications/test")
 async def test_notifications():
     return await run_in_threadpool(rt.notifier.test)
+
+
+# ---------------------------------------------------------------- evidence clips
+
+@app.get("/api/clips")
+async def list_clips(limit: int = Query(100, ge=1, le=1000)):
+    return await run_in_threadpool(rt.clips.list, limit)
+
+
+# ---------------------------------------------------------------- counting accuracy audits
+
+class AuditIn(BaseModel):
+    camera_id: str
+    start: float = Field(gt=0, description="unix seconds")
+    end: float = Field(gt=0)
+    manual_in: int = Field(ge=0)
+    manual_out: int | None = Field(None, ge=0)
+    note: str | None = Field(None, max_length=300)
+
+
+def _accuracy(engine: int, manual: int | None) -> float | None:
+    if manual is None:
+        return None
+    if manual == 0:
+        return 100.0 if engine == 0 else 0.0
+    return round(max(0.0, 100.0 - abs(engine - manual) / manual * 100.0), 1)
+
+
+@app.get("/api/audits")
+async def list_audits(limit: int = Query(50, ge=1, le=500)):
+    names = {c.id: c.name for c in rt.config_store.config.cameras}
+    rows = await run_in_threadpool(rt.store.audits, limit)
+    for a in rows:
+        a["camera"] = names.get(a["camera_id"], a["camera_id"])
+    return rows
+
+
+@app.get("/api/audits/live")
+async def audit_live(camera_id: str, since: float = Query(gt=0)):
+    """What the engine has counted on a camera since a manual count started (poll while counting by hand)."""
+    _runtime(camera_id)
+    c = await run_in_threadpool(rt.store.crossing_counts, camera_id, since, time.time())
+    return {"camera_id": camera_id, "since": since, "now": time.time(), **c}
+
+
+@app.post("/api/audits", status_code=201)
+async def add_audit(body: AuditIn):
+    """Close a manual count: compare it with the engine's crossings in the same window and keep the result."""
+    _runtime(body.camera_id)
+    if body.end <= body.start:
+        raise HTTPException(422, "end must be after start")
+    c = await run_in_threadpool(rt.store.crossing_counts, body.camera_id, body.start, body.end)
+    a = {"camera_id": body.camera_id, "start_ts": body.start, "end_ts": body.end, "manual_in": body.manual_in, "manual_out": body.manual_out,
+         "engine_in": c["in"], "engine_out": c["out"], "accuracy_in": _accuracy(c["in"], body.manual_in),
+         "accuracy_out": _accuracy(c["out"], body.manual_out), "note": body.note}
+    a["id"] = await run_in_threadpool(rt.store.add_audit, a)
+    return a
+
+
+# ---------------------------------------------------------------- live POS
+
+@app.post("/api/pos/transactions")
+async def pos_transactions(request: Request, forward: bool = True):
+    """Bills from the POS (webhook). Any of: {"transactions": [...]}, a list, or one bill; see app/pos.py for field aliases."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "body must be JSON")
+    try:
+        return await run_in_threadpool(rt.pos.ingest, body, "webhook", forward and rt.config_store.config.pos.forward)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.get("/api/pos/status")
+async def pos_status():
+    return await run_in_threadpool(rt.pos.status)
+
+
+@app.get("/api/pos/transactions")
+async def pos_list(hours: float = Query(24, gt=0, le=24 * 92), limit: int = Query(500, ge=1, le=5000)):
+    return await run_in_threadpool(rt.store.transactions, time.time() - hours * 3600, time.time() + 60, limit)
+
+
+@app.post("/api/pos/scan")
+async def pos_scan():
+    """Process the CSV drop folder now (it is also scanned every 30 s)."""
+    return {"bills": await run_in_threadpool(rt.pos.scan_inbox)}
+
+
+@app.put("/api/config/pos")
+async def put_pos(body: dict):
+    cfg = rt.config_store.config
+    with rt.config_store.lock:
+        cfg.pos = _merge(cfg.pos, body, PosConfig)
+        rt.config_store.save()
+    return cfg.to_dict()["pos"]
 
 
 @app.put("/api/config/report")
