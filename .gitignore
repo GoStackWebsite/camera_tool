@@ -25,3 +25,6 @@ data/*.db-shm
 data/*.jpg
 # downloaded ONNX models (fetched by app/demographics.py on first run)
 models/*.onnx
+
+# packaged source archives
+dist/
