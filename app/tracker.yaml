@@ -1,0 +1,8 @@
+# ByteTrack settings tuned for a fixed surveillance camera.
+tracker_type: bytetrack
+track_high_thresh: 0.5    # first-pass association threshold
+track_low_thresh: 0.1     # second-pass (low-confidence) threshold
+new_track_thresh: 0.6     # confidence needed to start a new track (higher = fewer ghost IDs)
+track_buffer: 60          # frames to keep a lost track alive (~4s at 15 fps)
+match_thresh: 0.8         # IoU matching threshold
+fuse_score: true

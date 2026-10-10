@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/*.db
+data/*.db-journal
+data/snapshots/
+*.pt
+install_*.log
+models/*.zip
+data/*.bak
+
+# runtime logs (python main.py / pythonw / tools\stack.ps1)
+logs/
+# cached Congruence Eye configuration (managed mode)
+data/congruence_remote.json
+# local configuration with the edge API key and camera credentials (never commit)
+data/config.json
+data/config.json.bak
+data/config.pre-managed.json
+data/mcp.json
+data/e2e_state.json
+data/*.db-wal
+data/*.db-shm
+data/*.jpg
+# downloaded ONNX models (fetched by app/demographics.py on first run)
+models/*.onnx

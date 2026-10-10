@@ -1,0 +1,13 @@
+# Install CUDA torch first (RTX 50-series needs CUDA 12.8+):
+#   pip install --index-url https://download.pytorch.org/whl/cu130 torch torchvision
+torch
+torchvision
+ultralytics>=8.3
+opencv-python>=4.10
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+numpy
+lap
+openpyxl>=3.1
+onnxruntime>=1.20

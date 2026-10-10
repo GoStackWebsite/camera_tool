@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cam-analytics",
+      "url": "http://localhost:8000"
+    },
+    {
+      "name": "cam-analytics-foreground (stop the Congruence Eye Stack task first)",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["main.py"],
+      "port": 8000,
+      "autoPort": false
+    }
+  ]
+}

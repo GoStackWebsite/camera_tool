@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retail Camera Analytics</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232322;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --seq1: #184f95; --seq2: #3987e5; --seq3: #86b6ef;
+    --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --crit: #d03b3b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec;
+      --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+      --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+      --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+      --seq1: #1c5cab; --seq2: #5598e7; --seq3: #b7d3f6;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; padding: 10px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; background: var(--page); z-index: 5; }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: 1px solid transparent; color: var(--ink-2); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.active { background: var(--surface-2); color: var(--ink); border-color: var(--border); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); } .dot.on { background: var(--good); } .dot.off { background: var(--crit); }
+  main { padding: 16px 20px; }
+  .tab { display: none; } .tab.active { display: block; }
+  .filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .filters button { padding: 4px 10px; font-size: 12px; }
+  .grid { display: grid; gap: 14px; }
+  .g2 { grid-template-columns: 1fr 1fr; } .g3 { grid-template-columns: repeat(3, 1fr); } .g21 { grid-template-columns: 1.6fr 1fr; }
+  @media (max-width: 1000px) { .g2, .g3, .g21 { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 0 0 10px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; } .card-head h2 { margin: 0; }
+  button, select, input { font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; } button:hover { border-color: var(--muted); } button.active { box-shadow: inset 0 0 0 1px var(--s1); border-color: var(--s1); }
+  button.primary { background: var(--s1); color: #fff; border-color: transparent; } button.danger:hover { border-color: var(--crit); }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; } .tile .label { color: var(--ink-2); font-size: 12px; } .tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; }
+  .tile.hero .value { font-size: 48px; line-height: 1.05; } .tile .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .bars { display: grid; grid-template-columns: minmax(80px, 160px) 1fr auto; gap: 6px 10px; align-items: center; }
+  .bars .lbl { color: var(--ink-2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .bars .track { height: 14px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+  .bars .fill { height: 100%; background: var(--s1); border-radius: 0 4px 4px 0; transition: width .3s; } .bars .val { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 48px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; } th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; } td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { max-height: 340px; overflow: auto; }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+  .chip.warn { background: color-mix(in srgb, var(--warn) 25%, transparent); color: var(--ink); } .chip.serious { background: color-mix(in srgb, var(--serious) 28%, transparent); color: var(--ink); }
+  .chip.crit { background: color-mix(in srgb, var(--crit) 30%, transparent); color: var(--ink); } .chip.good { background: color-mix(in srgb, var(--good) 25%, transparent); color: var(--ink); }
+  .pill.good { background: color-mix(in srgb, var(--good) 25%, transparent); } .pill.warn { background: color-mix(in srgb, var(--warn) 25%, transparent); } .pill.crit { background: color-mix(in srgb, var(--crit) 30%, transparent); }
+  .chip.in { background: color-mix(in srgb, var(--s1) 28%, transparent); color: var(--ink); } .chip.out { background: color-mix(in srgb, var(--s2) 28%, transparent); color: var(--ink); }
+  .chip.hot { background: color-mix(in srgb, var(--s2) 30%, transparent); color: var(--ink); } .chip.cold { background: color-mix(in srgb, var(--s1) 25%, transparent); color: var(--ink); } .chip.dead { background: var(--surface-2); color: var(--muted); }
+  .cams { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .cam { background: var(--surface-2); border-radius: 8px; overflow: hidden; cursor: pointer; border: 1px solid transparent; } .cam:hover { border-color: var(--muted); }
+  .cam img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; background: #000; }
+  .cam .meta { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 12px; }
+  .video-wrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16/9; } .video-wrap img { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .video-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; } .video-wrap canvas.drawing { cursor: crosshair; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; } .toolbar .sep { width: 1px; height: 22px; background: var(--border); }
+  .chart { position: relative; } .chart svg { width: 100%; height: 190px; display: block; overflow: visible; } .chart svg text { font-size: 11px; fill: var(--muted); }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.25); display: none; z-index: 2; min-width: 110px; }
+  .tooltip .tt-t { color: var(--muted); margin-bottom: 3px; } .tooltip .row { display: flex; align-items: center; gap: 6px; } .tooltip .row b { font-weight: 600; } .tooltip .row span { color: var(--ink-2); } .tooltip .key { width: 12px; height: 2px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); } .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .matrix { display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; font-size: 10px; color: var(--muted); overflow: hidden; }
+  .matrix .cell { aspect-ratio: 1.2; min-width: 0; border-radius: 2px; background: var(--surface-2); position: relative; }
+  .matrix .cl { overflow: hidden; } .matrix .cell:hover { outline: 1px solid var(--ink-2); }
+  .matrix .rl { align-self: center; } .matrix .cl { text-align: center; }
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; } .form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
+  .form label.check { flex-direction: row; align-items: center; gap: 8px; } .form input, .form select { width: 100%; } .form label.wide { grid-column: 1 / -1; }
+  .ev { display: grid; grid-template-columns: 62px 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--grid); font-size: 13px; } .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .alert { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--grid); }
+  .alert .msg { font-size: 13px; } .alert .when { color: var(--muted); font-size: 12px; }
+  .dim { opacity: .5; } .mt { margin-top: 12px; } .right { text-align: right; }
+  .funnel { display: grid; gap: 8px; } .funnel .step { display: grid; grid-template-columns: 110px 1fr 80px; gap: 10px; align-items: center; font-size: 13px; }
+  .funnel .bar { height: 22px; background: var(--s1); border-radius: 0 4px 4px 0; min-width: 2px; } .funnel .pct { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .toast { position: fixed; bottom: 16px; right: 16px; max-width: 420px; background: var(--surface); border: 1px solid var(--border); padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.3); display: none; z-index: 20; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="storeName">Retail Camera Analytics</h1>
+  <nav id="nav">
+    <button data-tab="dashboard" class="active">Dashboard</button><button data-tab="traffic">Traffic</button>
+    <button data-tab="zone">Zone</button><button data-tab="queue">Queue</button><button data-tab="trax">Trax</button><button data-tab="settings">Settings</button>
+  </nav>
+  <span style="flex:1"></span>
+  <span class="pill"><span class="dot" id="camDot"></span><span id="camText">connecting…</span></span>
+  <span class="pill" id="alertPill">0 open alerts</span>
+  <span class="pill" id="aiText"></span>
+  <span class="pill" id="cePill" style="display:none"></span>
+</header>
+
+<main>
+  <!-- ====================================================== DASHBOARD -->
+  <section class="tab active" id="tab-dashboard">
+    <div class="card">
+      <div class="tiles">
+        <div class="tile hero"><div class="label">Customers in store now</div><div class="value" id="kOcc">–</div><div class="sub" id="kOccSub"></div></div>
+        <div class="tile"><div class="label">Staff on floor</div><div class="value" id="kStaff">–</div></div>
+        <div class="tile"><div class="label">Walk-ins today</div><div class="value" id="kWalk">–</div><div class="sub" id="kWalkSub"></div></div>
+        <div class="tile"><div class="label">Engaged visits today</div><div class="value" id="kEng">–</div><div class="sub" id="kEngSub"></div></div>
+        <div class="tile"><div class="label">Avg dwell today</div><div class="value" id="kDwell">–</div></div>
+        <div class="tile"><div class="label">Conversion today</div><div class="value" id="kConv">–</div><div class="sub" id="kConvSub"></div></div>
+        <div class="tile"><div class="label">In queue now</div><div class="value" id="kQueue">–</div><div class="sub" id="kQueueSub"></div></div>
+        <div class="tile"><div class="label">Open alerts</div><div class="value" id="kAlerts">–</div></div>
+        <div class="tile"><div class="label">Store today</div><div class="value" id="kOpen" style="font-size:16px">–</div><div class="sub" id="kOpenSub"></div></div>
+      </div>
+    </div>
+    <div class="grid g21 mt">
+      <div class="card">
+        <div class="card-head"><h2>Cameras</h2><span class="hint">Click a camera to open it, draw the count line and zones</span></div>
+        <div class="cams" id="camGrid"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Open alerts</h2><button class="small" data-tab-link="trax">All alerts</button></div>
+        <div id="openAlerts"></div>
+      </div>
+    </div>
+    <div class="card mt" id="camDetail" style="display:none">
+      <div class="card-head"><h2 id="detTitle">Camera</h2><button class="small" id="detClose">Close</button></div>
+      <div class="grid g21">
+        <div>
+          <div class="video-wrap"><img id="detVideo" alt="Live stream"><canvas id="overlay"></canvas></div>
+          <div class="toolbar">
+            <button id="btnAnnot" class="active">Annotated</button><button id="btnRaw">Raw</button><button id="btnHeat">Heatmap</button>
+            <a id="btnSnap" href="#" target="_blank"><button>Snapshot</button></a>
+            <span class="sep"></span>
+            <button id="btnLine">Draw count line</button><button id="btnSwap">Swap IN/OUT</button>
+            <button id="btnZone">Draw zone</button>
+            <input id="zoneName" placeholder="Zone name" style="display:none;width:130px">
+            <select id="zoneRole" style="display:none"><option value="display">display / product area</option><option value="entrance">entrance</option><option value="checkout">checkout / counter</option><option value="queue">queue</option><option value="staff">staff area</option></select>
+            <button id="btnFinish" style="display:none" class="primary">Finish zone</button><button id="btnCancel" style="display:none">Cancel</button>
+            <span class="sep"></span><button id="btnClearLine">Clear line</button><button id="btnClearZones">Clear zones</button>
+          </div>
+          <div class="hint" id="drawHint">Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers.</div>
+        </div>
+        <div>
+          <div class="tiles">
+            <div class="tile"><div class="label">Customers</div><div class="value" id="dOcc">–</div></div>
+            <div class="tile"><div class="label">Staff</div><div class="value" id="dStaff">–</div></div>
+            <div class="tile"><div class="label">In / Out</div><div class="value" id="dInOut">–</div><div class="sub" id="dGroups"></div></div>
+            <div class="tile"><div class="label">Avg time in view</div><div class="value" id="dDwell">–</div></div>
+          </div>
+          <h2 class="mt">Zones</h2>
+          <table><thead><tr><th>Zone</th><th>Role</th><th class="num">Now</th><th class="num">Staff</th><th class="num">Visits</th><th class="num">Avg stay</th><th></th></tr></thead><tbody id="zoneRows"></tbody></table>
+          <h2 class="mt">People in view</h2>
+          <div class="scroll"><table><thead><tr><th>ID</th><th>Who</th><th>Activity</th><th class="num">In view</th><th>Zones</th><th></th></tr></thead><tbody id="trackRows"></tbody></table></div>
+        </div>
+      </div>
+    </div>
+    <div class="grid g2 mt">
+      <div class="card"><div class="card-head"><h2>Customers in store, last 10 minutes</h2><div class="legend"><span><i style="background:var(--s1)"></i>Customers</span><span><i style="background:var(--s2)"></i>Staff</span></div></div>
+        <div class="chart" id="liveChart"><svg></svg><div class="tooltip"></div></div></div>
+      <div class="card"><div class="card-head"><h2>Recent events</h2>
+        <select id="evFilter"><option value="all">All events</option><option value="line">Line crossings</option><option value="zone">Zone enter/exit</option><option value="sop">Staff / phone / lingering</option><option value="presence">Appear / leave</option></select></div>
+        <div class="scroll" id="events"></div></div>
+    </div>
+  </section>
+
+  <!-- ====================================================== TRAFFIC -->
+  <section class="tab" id="tab-traffic">
+    <div class="filters" data-range></div>
+    <div class="grid g3">
+      <div class="card"><h2>Footfall funnel</h2><div class="funnel" id="funnel"></div><div class="hint mt" id="funnelHint"></div></div>
+      <div class="card"><h2>Headline</h2><div class="tiles" id="trafficTiles"></div></div>
+      <div class="card"><h2>Peak hours (avg walk-ins per hour)</h2><div id="peakBars" class="bars"></div></div>
+    </div>
+    <div class="grid g3 mt">
+      <div class="card"><h2>Buyer analysis by age band</h2><div class="bars" id="ageBars"></div><div class="hint mt" id="demoHint"></div></div>
+      <div class="card"><h2>Gender split</h2><div class="tiles" id="genderTiles"></div><div class="bars mt" id="genderBars"></div></div>
+      <div class="card"><h2>Age × gender</h2><table><thead><tr><th>Band</th><th class="num">Men</th><th class="num">Women</th><th class="num">Engaged</th><th class="num">Avg dwell</th></tr></thead><tbody id="ageGenderRows"></tbody></table></div>
+    </div>
+    <div class="card mt"><div class="card-head"><h2>Walk-ins per hour</h2><div class="legend"><span><i style="background:var(--s1)"></i>Walk-ins</span><span><i style="background:var(--s2)"></i>Exits</span></div></div>
+      <div class="chart" id="hourlyChart"><svg></svg><div class="tooltip"></div></div></div>
+    <div class="card mt"><div class="card-head"><h2>Weekday × hour heat (avg walk-ins)</h2><span class="hint">Darker = busier. Use it to staff the floor.</span></div><div class="matrix" id="matrix"></div></div>
+    <div class="card mt"><div class="card-head"><h2>Visits</h2><button class="small" id="btnVisits">Show table</button></div><div class="scroll" id="visitsTable" style="display:none"></div></div>
+  </section>
+
+  <!-- ====================================================== ZONE -->
+  <section class="tab" id="tab-zone">
+    <div class="filters" data-range></div>
+    <div class="grid g21">
+      <div class="card"><h2>Zone ranking</h2>
+        <div class="scroll"><table><thead><tr><th>Zone</th><th>Camera</th><th>Role</th><th class="num">Footfall</th><th class="num">Unique</th><th class="num">Avg stay</th><th class="num">Engaged</th><th class="num">Share</th><th class="num">→ Checkout</th><th>Rank</th></tr></thead><tbody id="zoneRank"></tbody></table></div></div>
+      <div class="card"><h2>Zone footfall</h2><div class="bars" id="zoneBars"></div></div>
+    </div>
+    <div class="grid g2 mt">
+      <div class="card"><h2>Shopper journeys (zone → zone)</h2><div class="scroll"><table><thead><tr><th>Camera</th><th>From</th><th>To</th><th class="num">Shoppers</th></tr></thead><tbody id="journeys"></tbody></table></div></div>
+      <div class="card"><div class="card-head"><h2>Heatmaps (where people stand)</h2><span class="hint">Live, refreshed every 10 s</span></div><div class="cams" id="heatGrid"></div></div>
+    </div>
+  </section>
+
+  <!-- ====================================================== QUEUE -->
+  <section class="tab" id="tab-queue">
+    <div class="filters" data-range></div>
+    <div class="card"><div class="card-head"><h2>Queues right now</h2><span class="hint" id="queueHint"></span></div><div class="tiles" id="queueLive"></div></div>
+    <div class="card mt"><div class="card-head"><h2>Queue length over time (average people waiting)</h2><div class="legend" id="queueLegend"></div></div>
+      <div class="chart" id="queueChart"><svg></svg><div class="tooltip"></div></div></div>
+    <div class="card mt"><h2>Queue performance</h2>
+      <div style="overflow-x:auto"><table><thead><tr><th>Queue</th><th>Camera</th><th class="num">Served</th><th class="num">Avg wait</th><th class="num">Max wait</th><th class="num">Avg length</th><th class="num">Max length</th><th class="num">Breaches</th><th class="num">Breach time</th></tr></thead><tbody id="queueRows"></tbody></table></div>
+      <div class="hint mt">A queue breach is raised when more people than allowed wait longer than the threshold (Settings → Thresholds). Served = people who left the queue zone.</div></div>
+  </section>
+
+  <!-- ====================================================== TRAX -->
+  <section class="tab" id="tab-trax">
+    <div class="filters" data-range></div>
+    <div class="grid g3">
+      <div class="card"><h2>Alerts in period</h2><div class="bars" id="alertBars"></div></div>
+      <div class="card"><h2>Store day</h2><div class="tiles" id="dayTiles"></div></div>
+      <div class="card"><h2>Active SOP checks</h2><div id="sopRules"></div></div>
+    </div>
+    <div class="card mt"><div class="card-head"><h2>Open alerts</h2></div><div id="traxOpen"></div></div>
+    <div class="card mt"><div class="card-head"><h2>Alert history</h2></div><div class="scroll"><table><thead><tr><th>Started</th><th>Type</th><th>Camera</th><th>Zone</th><th>Message</th><th>Duration</th><th>Ack</th></tr></thead><tbody id="alertRows"></tbody></table></div></div>
+    <div class="card mt"><div class="card-head"><h2>Camera health (last 24 h)</h2></div><table><thead><tr><th>Camera</th><th>Status</th><th class="num">Uptime</th><th class="num">Outages</th><th class="num">Cam fps</th><th class="num">AI fps</th><th>Last error</th></tr></thead><tbody id="healthRows"></tbody></table></div>
+  </section>
+
+  <!-- ====================================================== SETTINGS -->
+  <section class="tab" id="tab-settings">
+    <div class="grid g2">
+      <div class="card"><h2>Store</h2>
+        <form class="form" id="fStore"><label>Store name<input name="name"></label><label>Opens (HH:MM)<input name="open_time"></label><label>Closes (HH:MM)<input name="close_time"></label><label>Grace minutes<input name="grace_minutes" type="number" min="0"></label></form>
+        <div class="toolbar"><button class="primary" data-save="store">Save store</button></div></div>
+      <div class="card"><h2>Daily report & sales</h2>
+        <form class="form" id="fReport"><label class="check"><input name="enabled" type="checkbox">Email a daily Excel report</label><label>At (HH:MM)<input name="daily_time"></label><label>Email to<input name="email_to" placeholder="manager@store.com"></label></form>
+        <div class="toolbar"><button class="primary" data-save="report">Save report settings</button><a href="/api/report/daily.xlsx"><button>Download today's report</button></a><button id="btnEmailReport">Email now</button></div>
+        <form class="form mt" id="fSales"><label>Date<input name="date" type="date"></label><label>Bills</label><label>Revenue<input name="revenue" type="number" min="0" step="0.01"></label></form>
+        <div class="toolbar"><button id="btnSales">Save sales for conversion</button><span class="hint">Conversion = bills ÷ walk-ins. Enter the day's bill count from your POS.</span></div>
+        <div class="scroll mt" id="salesRows"></div></div>
+    </div>
+    <div class="card mt"><div class="card-head"><h2>Cameras</h2><button class="small primary" id="btnAddCam">Add camera</button></div>
+      <table><thead><tr><th>ID</th><th>Name</th><th>URL</th><th>Status</th><th class="num">Line</th><th class="num">Zones</th><th>Blur</th><th></th></tr></thead><tbody id="camRows"></tbody></table>
+      <form class="form mt" id="fCam" style="display:none">
+        <label>Name<input name="name" required></label><label>ID (letters, digits, dashes)<input name="id" placeholder="auto"></label>
+        <label class="wide">RTSP URL<input name="url" placeholder="rtsp://10.0.0.93:554/streaming/channels/1501"></label>
+        <label>Username<input name="user"></label><label>Password<input name="password" type="password"></label>
+        <label>Max analysis fps (0 = default)<input name="target_fps" type="number" min="0" max="60" step="1" value="0"></label>
+        <label class="check"><input name="enabled" type="checkbox" checked>Enabled</label><label class="check"><input name="blur_faces" type="checkbox" checked>Blur faces in streams & snapshots</label>
+        <div class="toolbar wide" style="grid-column:1/-1"><button type="button" id="btnTestCam">Test connection</button><button type="submit" class="primary">Save camera</button><button type="button" id="btnCamCancel">Cancel</button><span class="hint" id="camTestResult"></span></div>
+      </form></div>
+    <div class="card mt"><h2>Thresholds</h2>
+      <form class="form" id="fThr">
+        <label>Engaged visit after (s)<input name="engage_seconds" type="number" step="1"></label><label>Zone engaged after (s)<input name="zone_engage_seconds" type="number" step="1"></label>
+        <label>Group window (s)<input name="group_window" type="number" step="0.5"></label><label>Group distance (frame fraction)<input name="group_distance" type="number" step="0.05"></label>
+        <label>Queue: people allowed<input name="queue_max" type="number" step="1"></label><label>Queue: breach after (s)<input name="queue_seconds" type="number" step="5"></label>
+        <label>Unattended customer after (s)<input name="unattended_seconds" type="number" step="5"></label><label>Staff attending within (frame fraction)<input name="attend_distance" type="number" step="0.05"></label>
+        <label>Phone use alert after (s)<input name="phone_seconds" type="number" step="1"></label><label class="check"><input name="phone_everyone" type="checkbox">Phone alerts for customers too</label>
+        <label>Classify as staff after (s in staff zone)<input name="staff_zone_seconds" type="number" step="5"></label><label>Lingering after (s)<input name="loiter_seconds" type="number" step="30"></label>
+        <label>Count line: dead band (frame fraction)<input name="line_margin" type="number" step="0.005" min="0"></label><label>Count line: confirm after (frames)<input name="line_min_frames" type="number" step="1" min="1"></label><label>Count line: cooldown (s)<input name="line_cooldown_seconds" type="number" step="0.5" min="0"></label>
+        <label>Crowd alert at (people)<input name="crowd_threshold" type="number" step="1"></label><label>Walk speed (frame-heights/s)<input name="walk_speed" type="number" step="0.01"></label><label>Run speed (frame-heights/s)<input name="run_speed" type="number" step="0.05"></label>
+      </form>
+      <div class="toolbar"><button class="primary" data-save="thresholds">Save thresholds</button><button id="btnReset" class="danger">Reset live counters</button></div></div>
+    <div class="card mt"><h2>Staff detection</h2>
+      <form class="form" id="fStaff">
+        <label>Treat anyone present longer than (minutes) as staff, 0 = off<input name="after_minutes" type="number" min="0" step="5"></label>
+      </form>
+      <div class="mt"><b style="font-size:13px">Uniform colours</b><div id="uniformList" class="mt"></div></div>
+      <div class="toolbar"><button class="primary" data-save="staff">Save staff settings</button><span class="hint">Staff are recognised by a staff zone (draw one behind the counter), by uniform colour (open a camera and press "Staff" on a person wearing the uniform), or by long presence. Staff are excluded from footfall and enable the unattended-customer and phone checks.</span></div></div>
+    <div class="card mt"><h2>Demographics (anonymous age band &amp; gender)</h2>
+      <form class="form" id="fDemo">
+        <label class="check"><input name="enabled" type="checkbox">Estimate age band and gender from faces</label>
+        <label>Smallest face to use (px)<input name="min_face" type="number" min="8" step="2"></label>
+        <label>Analyse faces every N frames<input name="sample_every" type="number" min="1" step="1"></label>
+        <label>Samples per person<input name="max_samples" type="number" min="1" step="5"></label>
+      </form>
+      <div class="toolbar"><button class="primary" data-save="demographics">Save demographics</button><span class="hint">Works best on an entrance camera at face height (faces ≥ 40 px). No face images are stored, only the age band and gender of each visit.</span></div></div>
+    <div class="card mt"><h2>Notifications</h2>
+      <form class="form" id="fNotify">
+        <label>Telegram bot token<input name="telegram_bot_token" type="password"></label><label>Telegram chat id<input name="telegram_chat_id"></label>
+        <label class="wide">Webhook URL (POST JSON)<input name="webhook_url" placeholder="https://..."></label>
+        <label>SMTP host<input name="smtp_host"></label><label>SMTP port<input name="smtp_port" type="number"></label><label>SMTP user<input name="smtp_user"></label><label>SMTP password<input name="smtp_password" type="password"></label>
+        <label>Email from<input name="email_from"></label><label>Email to<input name="email_to"></label>
+        <label class="wide">Alert types to send<div id="notifyTypes" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:4px"></div></label>
+      </form>
+      <div class="toolbar"><button class="primary" data-save="notifications">Save notifications</button><button id="btnTestNotify">Send test</button><span class="hint" id="notifyResult"></span></div></div>
+    <div class="card mt"><h2>Congruence Eye</h2>
+      <form class="form" id="fCE" onsubmit="return false">
+        <label class="check"><input name="enabled" type="checkbox">Send this store's analytics to Congruence Eye (this PC acts as the store's edge box)</label>
+        <label class="wide">Server URL<input name="base_url" placeholder="http://localhost:3000"></label>
+        <label class="wide">Edge API key (Congruence Eye &rsaquo; Admin &rsaquo; Edge devices)<input name="api_key" type="password" autocomplete="off"></label>
+        <label class="check wide"><input name="managed" type="checkbox">Take cameras, count line and zones from Congruence Eye (draw them there under Admin &rsaquo; Zones; nothing to map by hand)</label>
+      </form>
+      <div class="toolbar"><button id="btnCETest">Test connection</button><button id="btnCESync" style="display:none">Sync now</button><button class="primary" id="btnCESave">Save Congruence Eye settings</button><span class="hint" id="ceResult"></span></div>
+      <div id="ceMap" class="mt"></div>
+      <div class="hint mt" id="ceStatus"></div></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+  const NS = 'http://www.w3.org/2000/svg';
+  const fmtClock = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  const fmtHM = ts => new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const fmtDayHM = ts => new Date(ts * 1000).toLocaleString([], {weekday: 'short', hour: '2-digit', minute: '2-digit'});
+  const fmtDT = ts => ts ? new Date(ts * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}) : '';
+  const fmtDur = s => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  const el = (tag, attrs = {}, parent = null) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+  const text = (parent, tag, txt, cls) => { const e = document.createElement(tag); e.textContent = txt; if (cls) e.className = cls; parent.appendChild(e); return e; };
+  const niceStep = raw => { const p = Math.pow(10, Math.floor(Math.log10(raw))); const r = raw / p; return (r <= 1 ? 1 : r <= 2 ? 2 : r <= 5 ? 5 : 10) * p; };
+  const niceTicks = (max, n = 4) => { max = Math.max(max, 1); const step = niceStep(max / n); const t = []; for (let v = 0; v < max + step * 0.999; v += step) t.push(+v.toFixed(6)); return t; };
+  const toast = msg => { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', msg.length > 80 ? 9000 : 3500); };
+  const api = async (url, method = 'GET', body = null) => {
+    const res = await fetch(url, {method, headers: body ? {'Content-Type': 'application/json'} : {}, body: body ? JSON.stringify(body) : null});
+    if (!res.ok) { let d = ''; try { d = JSON.stringify((await res.json()).detail); } catch (e) {} throw new Error(`${res.status} ${d}`); }
+    return res.status === 204 ? null : res.json();
+  };
+  const ALERT_LABEL = {queue_breach: 'Queue breach', unattended: 'Unattended customer', phone_usage: 'Phone usage', crowd: 'Crowd', loiter: 'Lingering', camera_offline: 'Camera offline', store_open_late: 'Store not opened', store_not_closed: 'Still occupied'};
+  const ALERT_CLS = {queue_breach: 'crit', unattended: 'warn', phone_usage: 'serious', crowd: 'warn', loiter: 'warn', camera_offline: 'crit', store_open_late: 'crit', store_not_closed: 'serious'};
+
+  // ------------------------------------------------------------ state
+  let CFG = {store: {}, cameras: [], thresholds: {}, notifications: {}, report: {}};
+  let S = null, cfgRevs = {}, rangeHours = 0, tab = 'dashboard';
+  let detailCam = null, mode = 'annotated', heat = false, drawMode = null, drawPts = [];
+  let traffic = null, lastHist = 0;
+
+  // ------------------------------------------------------------ tabs + range
+  function showTab(name) {
+    tab = name; $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    $$('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
+    renderCamGrid(true); if (name !== 'dashboard') closeDetail();
+    if (name === 'zone') renderHeatGrid();
+    if (['traffic', 'zone', 'queue', 'trax'].includes(name)) loadHistory(true);
+    if (name === 'queue') renderQueueLive();
+    if (name === 'settings') renderSettings();
+  }
+  $('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
+  document.addEventListener('click', e => { const b = e.target.closest('[data-tab-link]'); if (b) showTab(b.dataset.tabLink); });
+  $$('[data-range]').forEach(div => {
+    [['Today', 0], ['1h', 1], ['6h', 6], ['24h', 24], ['7d', 168], ['30d', 720]].forEach(([l, h]) => { const b = text(div, 'button', l); b.dataset.h = h; if (h === rangeHours) b.classList.add('active'); });
+    div.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; rangeHours = +b.dataset.h; $$('[data-range] button').forEach(x => x.classList.toggle('active', +x.dataset.h === rangeHours)); loadHistory(true); });
+  });
+  const rangeQ = () => rangeHours ? `hours=${rangeHours}` : 'hours=0';
+
+  // ------------------------------------------------------------ live stats
+  function connect() {
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+    ws.onmessage = e => render(JSON.parse(e.data));
+    ws.onclose = () => { $('#camDot').className = 'dot off'; $('#camText').textContent = 'server offline, retrying…'; setTimeout(connect, 2000); };
+  }
+  function render(s) {
+    S = s;
+    const st = s.store, cams = Object.values(s.cameras);
+    $('#storeName').textContent = st.name || 'Retail Camera Analytics';
+    $('#camDot').className = 'dot ' + (st.cameras_online === st.cameras_total && st.cameras_total ? 'on' : 'off');
+    $('#camText').textContent = `${st.cameras_online}/${st.cameras_total} cameras online`;
+    const inf = cams.find(c => c.inference) ? cams.find(c => c.inference).inference : null;
+    $('#aiText').textContent = inf ? `${inf.model.replace('.pt', '')} on ${inf.device}` : 'no camera running';
+    $('#alertPill').textContent = `${s.open_alerts.length} open alert${s.open_alerts.length === 1 ? '' : 's'}`; renderCEPill(s.congruence);
+    $('#alertPill').style.color = s.open_alerts.length ? 'var(--serious)' : '';
+    $('#kOcc').textContent = st.occupancy; $('#kOccSub').textContent = `${st.loitering} lingering · ${st.phones} on phone`;
+    $('#kStaff').textContent = st.staff; $('#kAlerts').textContent = s.open_alerts.length;
+    $('#kOpen').textContent = st.opened_at ? 'Opened ' + fmtHM(st.opened_at) : 'Nobody seen yet';
+    $('#kOpenSub').textContent = st.last_presence ? 'last person ' + fmtHM(st.last_presence) : '';
+    let changed = false;
+    for (const c of cams) { if (cfgRevs[c.camera_id] !== c.cfg_rev) { cfgRevs[c.camera_id] = c.cfg_rev; changed = true; } }
+    if (changed || cams.length !== CFG.cameras.filter(c => c.enabled).length) loadConfig();
+    renderCamGrid(false); renderOpenAlerts(s.open_alerts, $('#openAlerts'), false); renderLive(cams); renderEvents(cams);
+    if (detailCam && s.cameras[detailCam]) renderDetail(s.cameras[detailCam]);
+    if (tab === 'trax') renderOpenAlerts(s.open_alerts, $('#traxOpen'), true);
+    if (tab === 'queue') renderQueueLive();
+    const qz = cams.flatMap(c => (c.zones || []).filter(z => z.role === 'queue')); const waiting = qz.reduce((a, z) => a + z.count, 0);
+    $('#kQueue').textContent = qz.length ? waiting : '–'; $('#kQueueSub').textContent = qz.length ? (waiting ? `longest wait ${fmtDur(Math.max(...qz.map(z => z.max_wait)))}` + (qz.some(z => z.queue_breach) ? ' · BREACH' : '') : 'no one waiting') : 'no queue zone drawn';
+    if (Date.now() - lastHist > 60000) loadHistory(false);
+  }
+  async function loadConfig() { CFG = await api('/api/config'); if (tab === 'settings') renderSettings(); if (detailCam) renderZoneRows(S && S.cameras[detailCam]); }
+
+  // ------------------------------------------------------------ camera grid + detail
+  let gridKey = '';
+  function renderCamGrid(force) {
+    const grid = $('#camGrid'); const cams = S ? Object.values(S.cameras) : [];
+    const key = cams.map(c => c.camera_id).join(',') + '|' + (tab === 'dashboard');
+    if (key !== gridKey || force) {
+      gridKey = key; grid.innerHTML = '';
+      for (const c of cams) {
+        const card = document.createElement('div'); card.className = 'cam'; card.dataset.id = c.camera_id;
+        const img = document.createElement('img'); img.alt = c.name; img.src = tab === 'dashboard' ? `/video/${c.camera_id}?width=640&t=${Date.now()}` : ''; card.appendChild(img);
+        const meta = document.createElement('div'); meta.className = 'meta'; text(meta, 'b', c.name); text(meta, 'span', '', 'live'); card.appendChild(meta);
+        card.onclick = () => openDetail(c.camera_id); grid.appendChild(card);
+      }
+      if (!cams.length) text(grid, 'div', 'No cameras running. Add one under Settings.', 'hint');
+    }
+    for (const c of cams) { const card = grid.querySelector(`.cam[data-id="${CSS.escape(c.camera_id)}"]`); if (card) card.querySelector('.live').textContent = c.camera.connected ? `${c.occupancy} customers · ${c.staff} staff` : (c.camera.error || 'offline'); }
+  }
+  function openDetail(id) {
+    detailCam = id; $('#camDetail').style.display = ''; setVideo(); endDraw();
+    $('#camDetail').scrollIntoView({behavior: 'smooth', block: 'start'});
+    if (S && S.cameras[id]) { renderDetail(S.cameras[id]); }
+  }
+  function closeDetail() { detailCam = null; $('#camDetail').style.display = 'none'; $('#detVideo').src = ''; }
+  $('#detClose').onclick = closeDetail;
+  const camCfg = () => CFG.cameras.find(c => c.id === detailCam) || {zones: [], line: null};
+  function setVideo() { if (!detailCam) return; $('#detVideo').src = `/video/${detailCam}?mode=${mode}&heat=${heat ? 1 : 0}&t=${Date.now()}`; $('#btnSnap').href = `/snapshot/${detailCam}.jpg?mode=${mode}&heat=${heat ? 1 : 0}`; }
+  $('#btnAnnot').onclick = () => { mode = 'annotated'; $('#btnAnnot').classList.add('active'); $('#btnRaw').classList.remove('active'); setVideo(); };
+  $('#btnRaw').onclick = () => { mode = 'raw'; $('#btnRaw').classList.add('active'); $('#btnAnnot').classList.remove('active'); setVideo(); };
+  $('#btnHeat').onclick = () => { heat = !heat; $('#btnHeat').classList.toggle('active', heat); setVideo(); };
+  function renderDetail(c) {
+    $('#detTitle').textContent = `${c.name} · ${c.camera.connected ? `${c.camera.width}×${c.camera.height} @ ${c.camera.fps} fps · AI ${c.inference.fps} fps` : (c.camera.error || 'connecting…')}`;
+    $('#dOcc').textContent = c.occupancy; $('#dStaff').textContent = c.staff; $('#dInOut').textContent = `${c.entries} / ${c.exits}`;
+    $('#dGroups').textContent = c.has_line ? `${c.groups_in} groups` : 'no count line'; $('#dDwell').textContent = c.avg_dwell ? fmtDur(c.avg_dwell) : '–';
+    renderZoneRows(c); renderTracks(c.tracks);
+  }
+  function renderZoneRows(c) {
+    const tb = $('#zoneRows'); tb.innerHTML = ''; const cfg = camCfg(); const stats = (c && c.zones) || [];
+    const managed = !!cfg.managed;
+    ['#btnLine', '#btnSwap', '#btnZone', '#btnClearLine', '#btnClearZones'].forEach(sel => { const el = $(sel); if (el) el.style.display = managed ? 'none' : ''; });
+    if (managed && !drawMode) $('#drawHint').textContent = 'This camera, its count line and zones come from Congruence Eye: edit them there (Admin › Zones) and press Sync now in Settings.';
+    if (!cfg.zones.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', managed ? 'No zones for this camera in Congruence Eye yet.' : 'No zones yet. Use "Draw zone".', 'hint'); td.colSpan = 7; tb.appendChild(tr); return; }
+    for (const z of cfg.zones) {
+      const st = stats.find(x => x.name === z.name) || {count: 0, staff: 0, visits: 0, avg_dwell: 0};
+      const tr = document.createElement('tr'); text(tr, 'td', z.name); const td = document.createElement('td'); text(td, 'span', z.role, 'chip'); if (st.queue_breach) { td.append(' '); text(td, 'span', 'QUEUE', 'chip crit'); } if (st.unattended) { td.append(' '); text(td, 'span', 'UNATTENDED', 'chip warn'); } tr.appendChild(td);
+      text(tr, 'td', st.count, 'num'); text(tr, 'td', st.staff, 'num'); text(tr, 'td', st.visits, 'num'); text(tr, 'td', st.avg_dwell ? fmtDur(st.avg_dwell) : '–', 'num');
+      const td2 = document.createElement('td'); if (!managed) { const b = text(td2, 'button', '✕', 'small'); b.title = 'Remove zone'; b.onclick = () => saveLayout({zones: cfg.zones.filter(x => x.name !== z.name)}); } tr.appendChild(td2); tb.appendChild(tr);
+    }
+  }
+  const hsvToRgb = (h, s, v) => { const H = h * 2 / 60, S = s / 255, V = v / 255; const c = V * S, x = c * (1 - Math.abs(H % 2 - 1)), m = V - c; const [r, g, b] = H < 1 ? [c, x, 0] : H < 2 ? [x, c, 0] : H < 3 ? [0, c, x] : H < 4 ? [0, x, c] : H < 5 ? [x, 0, c] : [c, 0, x]; return `rgb(${Math.round((r + m) * 255)},${Math.round((g + m) * 255)},${Math.round((b + m) * 255)})`; };
+  function renderUniforms() {
+    const box = $('#uniformList'); box.innerHTML = ''; const list = (CFG.staff && CFG.staff.uniforms) || [];
+    if (!list.length) { text(box, 'div', 'No uniform colours learned yet.', 'hint'); return; }
+    list.forEach((u, i) => { const row = document.createElement('div'); row.className = 'ev'; row.style.gridTemplateColumns = '24px 1fr auto'; const sw = document.createElement('span'); sw.style.cssText = `display:inline-block;width:18px;height:18px;border-radius:4px;border:1px solid var(--border);background:${hsvToRgb(u.h, u.s, u.v)}`; row.appendChild(sw); const nm = document.createElement('span'); nm.textContent = u.name; const kind = u.v < 70 ? 'dark' : (u.s < 55 && u.v > 160 ? 'white' : ''); const logo = (Array.isArray(u.logo_hues) && u.logo_hues.length) || u.logo_white; if (logo) { nm.append(' '); text(nm, 'span', '+ printed logo: only counts when the print is visible', 'chip good'); } else if (kind) { nm.append(' '); text(nm, 'span', `${kind}: matches most ${kind} clothing`, 'chip warn'); } row.appendChild(nm); const b = text(row, 'button', 'Remove', 'small'); b.onclick = async () => { try { await api('/api/config/staff', 'PUT', {after_minutes: +$('#fStaff input[name=after_minutes]').value, uniforms: list.filter((_, j) => j !== i)}); await loadConfig(); renderUniforms(); } catch (e) { toast(e.message); } }; box.appendChild(row); });
+  }
+  async function tagStaff(tid, flag) {
+    try { const r = await api(`/api/cameras/${detailCam}/tracks/${tid}/staff`, 'POST', {staff: flag, learn_uniform: flag}); const warn = r.learned && r.learned.kind !== 'distinct' ? ` Warning: this is a ${r.learned.kind} colour and will match most ${r.learned.kind} clothing. Remove it under Settings → Staff detection if that is not wanted.` : '';
+    toast(flag ? (r.learned ? `Marked as staff and learned uniform colour "${r.learned.name}".${warn}` : 'Marked as staff (uniform colour not learned: face not visible yet, try again when they face the camera)') : 'Marked as customer'); await loadConfig(); }
+    catch (e) { toast('Could not tag: ' + e.message); }
+  }
+  function renderTracks(tracks) {
+    const tb = $('#trackRows'); tb.innerHTML = '';
+    if (!tracks || !tracks.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'Nobody in view', 'hint'); td.colSpan = 6; tb.appendChild(tr); return; }
+    for (const t of tracks) {
+      const tr = document.createElement('tr'); text(tr, 'td', '#' + t.id);
+      const who = document.createElement('td'); if (t.torso) { const sw = document.createElement('span'); sw.title = 'clothing colour'; sw.style.cssText = `display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px;background:${hsvToRgb(...t.torso)}`; who.appendChild(sw); } text(who, 'span', t.staff ? 'staff' + (t.staff_reason ? ' · ' + t.staff_reason : '') : 'customer', 'chip' + (t.staff ? ' in' : '')); if (t.phone) { who.append(' '); text(who, 'span', 'phone', 'chip serious'); } if (t.loitering) { who.append(' '); text(who, 'span', 'lingering', 'chip warn'); } if (t.gender) { who.append(' '); text(who, 'span', `${t.gender === 'M' ? 'man' : 'woman'} ~${t.age}`, 'chip'); } tr.appendChild(who);
+      text(tr, 'td', t.activity); text(tr, 'td', fmtDur(t.dwell), 'num'); text(tr, 'td', t.zones.join(', ') || '–'); const act = document.createElement('td'); const b = text(act, 'button', t.staff ? 'Not staff' : 'Staff', 'small'); b.title = t.staff ? 'Mark this person as a customer' : 'Mark this person as staff and learn the uniform colour'; b.onclick = () => tagStaff(t.id, !t.staff); tr.appendChild(act); tb.appendChild(tr);
+    }
+  }
+  // drawing on the detail video
+  const overlay = $('#overlay'), video = $('#detVideo');
+  function fitOverlay() { const r = overlay.getBoundingClientRect(); overlay.width = Math.round(r.width); overlay.height = Math.round(r.height); drawOverlay(); }
+  new ResizeObserver(fitOverlay).observe(overlay);
+  function frameRect() { const cw = overlay.width, ch = overlay.height, iw = video.naturalWidth || 16, ih = video.naturalHeight || 9; const s = Math.min(cw / iw, ch / ih); const w = iw * s, h = ih * s; return {x: (cw - w) / 2, y: (ch - h) / 2, w, h}; }
+  const toNorm = (px, py) => { const f = frameRect(); return [Math.min(1, Math.max(0, (px - f.x) / f.w)), Math.min(1, Math.max(0, (py - f.y) / f.h))]; };
+  const toPx = (nx, ny) => { const f = frameRect(); return [f.x + nx * f.w, f.y + ny * f.h]; };
+  function drawOverlay() {
+    const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); if (!drawMode) return;
+    ctx.lineWidth = 2; ctx.strokeStyle = '#ffd400'; ctx.fillStyle = '#ffd400'; const pts = drawPts.map(p => toPx(p[0], p[1]));
+    if (pts.length) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); if (drawMode === 'zone' && pts.length > 2) ctx.closePath(); ctx.stroke(); pts.forEach(p => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill(); }); }
+  }
+  function startDraw(kind) {
+    drawMode = kind; drawPts = []; overlay.classList.add('drawing');
+    ['#btnFinish', '#zoneName', '#zoneRole'].forEach(s => $(s).style.display = kind === 'zone' ? '' : 'none'); $('#btnCancel').style.display = '';
+    $('#btnLine').classList.toggle('active', kind === 'line'); $('#btnZone').classList.toggle('active', kind === 'zone');
+    $('#zoneName').value = ''; $('#zoneName').placeholder = `Zone ${camCfg().zones.length + 1}`;
+    $('#drawHint').textContent = kind === 'line' ? 'Click two points across the entrance. Crossing from the OUT side to the IN side counts a walk-in; use Swap IN/OUT if it is reversed.' : 'Click the corners of the area at floor level, pick a role, then press Finish zone.';
+    drawOverlay();
+  }
+  function endDraw() {
+    drawMode = null; drawPts = []; overlay.classList.remove('drawing');
+    ['#btnFinish', '#zoneName', '#zoneRole', '#btnCancel'].forEach(s => $(s).style.display = 'none');
+    $('#btnLine').classList.remove('active'); $('#btnZone').classList.remove('active');
+    $('#drawHint').textContent = 'Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers.';
+    drawOverlay();
+  }
+  overlay.addEventListener('pointerdown', async e => {
+    if (!drawMode) return; const r = overlay.getBoundingClientRect(); drawPts.push(toNorm(e.clientX - r.left, e.clientY - r.top)); drawOverlay();
+    if (drawMode === 'line' && drawPts.length === 2) { await saveLayout({line: drawPts.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)])}); endDraw(); }
+  });
+  $('#btnLine').onclick = () => drawMode === 'line' ? endDraw() : startDraw('line');
+  $('#btnZone').onclick = () => drawMode === 'zone' ? endDraw() : startDraw('zone');
+  $('#btnCancel').onclick = endDraw;
+  $('#btnFinish').onclick = async () => {
+    if (drawPts.length < 3) { toast('A zone needs at least 3 points.'); return; }
+    const name = ($('#zoneName').value.trim() || `Zone ${camCfg().zones.length + 1}`).slice(0, 40); const role = $('#zoneRole').value;
+    const zones = camCfg().zones.filter(z => z.name !== name).concat([{name, role, points: drawPts.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)])}]);
+    await saveLayout({zones}); endDraw();
+  };
+  $('#btnSwap').onclick = () => { const c = camCfg(); if (c.line) saveLayout({line: [c.line[1], c.line[0]]}); };
+  $('#btnClearLine').onclick = () => saveLayout({line: null});
+  $('#btnClearZones').onclick = () => { if (camCfg().zones.length && confirm('Remove all zones on this camera?')) saveLayout({zones: []}); };
+  async function saveLayout(patch) {
+    const c = camCfg(); const body = {line: 'line' in patch ? patch.line : c.line, zones: patch.zones || c.zones};
+    try { await api(`/api/cameras/${detailCam}/layout`, 'PUT', body); await loadConfig(); if (S && S.cameras[detailCam]) renderZoneRows(S.cameras[detailCam]); toast('Layout saved'); }
+    catch (e) { toast('Could not save: ' + e.message); }
+  }
+
+  // ------------------------------------------------------------ alerts + events
+  function renderOpenAlerts(list, box, withActions) {
+    box.innerHTML = '';
+    if (!list.length) { text(box, 'div', 'No open alerts', 'hint'); return; }
+    for (const a of list) {
+      const row = document.createElement('div'); row.className = 'alert';
+      text(row, 'span', ALERT_LABEL[a.type] || a.type, 'chip ' + (ALERT_CLS[a.type] || ''));
+      const mid = document.createElement('div'); text(mid, 'div', a.message, 'msg'); text(mid, 'div', 'since ' + fmtClock(a.started) + (a.acked ? ' · acknowledged' : ''), 'when'); row.appendChild(mid);
+      const act = document.createElement('div');
+      if (!a.acked) { const b = text(act, 'button', 'Ack', 'small'); b.onclick = async () => { await api(`/api/alerts/${a.id}/ack`, 'POST'); toast('Acknowledged'); }; }
+      if (withActions) { act.append(' '); const b2 = text(act, 'button', 'Resolve', 'small'); b2.onclick = async () => { await api(`/api/alerts/${a.id}/resolve`, 'POST'); loadHistory(true); }; }
+      row.appendChild(act); box.appendChild(row);
+    }
+  }
+  const EV_GROUPS = {line: ['line_in', 'line_out'], zone: ['zone_enter', 'zone_exit'], sop: ['staff', 'phone', 'loiter', 'running'], presence: ['enter', 'leave']};
+  const EV_CHIP = {line_in: ['in', 'IN'], line_out: ['out', 'OUT'], loiter: ['warn', 'linger'], phone: ['serious', 'phone'], staff: ['in', 'staff'], running: ['serious', 'running'], zone_enter: ['', 'zone'], zone_exit: ['', 'zone'], enter: ['', 'appear'], leave: ['', 'leave']};
+  $('#evFilter').onchange = () => S && renderEvents(Object.values(S.cameras));
+  function renderEvents(cams) {
+    const box = $('#events'); const f = $('#evFilter').value; box.innerHTML = '';
+    const names = {}; cams.forEach(c => names[c.camera_id] = c.name);
+    const list = cams.flatMap(c => c.events || []).filter(e => f === 'all' || EV_GROUPS[f].includes(e.type)).sort((a, b) => b.ts - a.ts).slice(0, 60);
+    if (!list.length) { text(box, 'div', 'No events yet', 'hint'); return; }
+    for (const e of list) { const row = document.createElement('div'); row.className = 'ev'; text(row, 'span', fmtClock(e.ts), 't'); text(row, 'span', (cams.length > 1 ? names[e.camera_id] + ': ' : '') + e.message); const c = EV_CHIP[e.type] || ['', e.type]; text(row, 'span', c[1], 'chip ' + c[0]); box.appendChild(row); }
+  }
+
+  // ------------------------------------------------------------ charts
+  function lineChart(root, seriesList, {xFmt, unit = ''}) {
+    const svg = root.querySelector('svg'), tip = root.querySelector('.tooltip'); svg.innerHTML = '';
+    const W = svg.clientWidth || 600, H = svg.clientHeight || 190; svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const m = {t: 10, r: 40, b: 22, l: 30}, iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const all = seriesList.flatMap(s => s.pts);
+    if (all.length < 2) { el('text', {x: W / 2, y: H / 2, 'text-anchor': 'middle'}, svg).textContent = 'Collecting data…'; return; }
+    const x0 = Math.min(...all.map(p => p.x)), x1 = Math.max(...all.map(p => p.x)), ticks = niceTicks(Math.max(...all.map(p => p.y))), yTop = ticks[ticks.length - 1];
+    const sx = x => m.l + (x - x0) / (x1 - x0 || 1) * iw, sy = y => m.t + ih - y / yTop * ih;
+    for (const v of ticks) { el('line', {x1: m.l, x2: m.l + iw, y1: sy(v), y2: sy(v), stroke: 'var(--grid)'}, svg); el('text', {x: m.l - 6, y: sy(v) + 4, 'text-anchor': 'end'}, svg).textContent = v; }
+    for (let i = 0; i <= 4; i++) { const x = x0 + (x1 - x0) * i / 4; el('text', {x: sx(x), y: H - 4, 'text-anchor': i === 0 ? 'start' : i === 4 ? 'end' : 'middle'}, svg).textContent = xFmt(x); }
+    for (const s of seriesList) {
+      if (s.pts.length < 2) continue;
+      const d = s.pts.map((p, i) => (i ? 'L' : 'M') + sx(p.x).toFixed(1) + ' ' + sy(p.y).toFixed(1)).join(' ');
+      if (s.area) { const a = el('path', {d: d + ` L${sx(s.pts[s.pts.length - 1].x).toFixed(1)} ${sy(0)} L${sx(s.pts[0].x).toFixed(1)} ${sy(0)} Z`}, svg); a.style.fill = s.color; a.style.opacity = .1; }
+      const line = el('path', {d, fill: 'none', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, svg); line.style.stroke = s.color;
+      const last = s.pts[s.pts.length - 1]; const dot = el('circle', {cx: sx(last.x), cy: sy(last.y), r: 4, 'stroke-width': 2}, svg); dot.style.fill = s.color; dot.style.stroke = 'var(--surface)';
+      const lbl = el('text', {x: sx(last.x) + 8, y: sy(last.y) + 4}, svg); lbl.textContent = last.y + unit; lbl.style.fill = 'var(--ink-2)'; lbl.style.fontSize = '12px';
+    }
+    const cross = el('line', {y1: m.t, y2: m.t + ih, stroke: 'var(--axis)', visibility: 'hidden'}, svg);
+    const hit = el('rect', {x: m.l, y: 0, width: iw, height: H, fill: 'transparent'}, svg);
+    hit.addEventListener('pointermove', e => {
+      const r = svg.getBoundingClientRect(); const xv = x0 + ((e.clientX - r.left) * (W / r.width) - m.l) / iw * (x1 - x0);
+      tip.innerHTML = ''; let bx = null;
+      for (const s of seriesList) { let best = null; for (const p of s.pts) if (!best || Math.abs(p.x - xv) < Math.abs(best.x - xv)) best = p; if (!best) continue; bx = bx === null ? best.x : bx; const row = document.createElement('div'); row.className = 'row'; const k = document.createElement('i'); k.className = 'key'; k.style.background = s.color; row.appendChild(k); text(row, 'b', best.y + unit); text(row, 'span', s.label); tip.appendChild(row); }
+      if (bx === null) return; tip.prepend(Object.assign(document.createElement('div'), {className: 'tt-t', textContent: xFmt(bx, true)}));
+      cross.setAttribute('x1', sx(bx)); cross.setAttribute('x2', sx(bx)); cross.setAttribute('visibility', 'visible');
+      tip.style.display = 'block'; const px = sx(bx) * (r.width / W); tip.style.left = (px + 12 + 130 > r.width ? px - 142 : px + 12) + 'px'; tip.style.top = '8px';
+    });
+    hit.addEventListener('pointerleave', () => { tip.style.display = 'none'; cross.setAttribute('visibility', 'hidden'); });
+  }
+  function columnChart(root, bins, series, {xFmt}) {
+    const svg = root.querySelector('svg'), tip = root.querySelector('.tooltip'); svg.innerHTML = '';
+    const W = svg.clientWidth || 600, H = svg.clientHeight || 190; svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const m = {t: 10, r: 12, b: 22, l: 30}, iw = W - m.l - m.r, ih = H - m.t - m.b;
+    if (!bins.length) { el('text', {x: W / 2, y: H / 2, 'text-anchor': 'middle'}, svg).textContent = 'No data in this period'; return; }
+    const ticks = niceTicks(Math.max(...bins.map(b => Math.max(...series.map(s => b[s.key] || 0))))), yTop = ticks[ticks.length - 1];
+    const sy = y => m.t + ih - y / yTop * ih, band = iw / bins.length, bw = Math.min(24, Math.max(1, (band - 2) / series.length - 2));
+    for (const v of ticks) { el('line', {x1: m.l, x2: m.l + iw, y1: sy(v), y2: sy(v), stroke: 'var(--grid)'}, svg); el('text', {x: m.l - 6, y: sy(v) + 4, 'text-anchor': 'end'}, svg).textContent = v; }
+    const lblEvery = Math.ceil(bins.length / 6);
+    bins.forEach((b, i) => {
+      const gx = m.l + band * i + (band - (bw + 2) * series.length) / 2;
+      const rects = series.map((s, j) => { const v = b[s.key] || 0, h = v / yTop * ih, x = gx + j * (bw + 2), y = sy(v), r = Math.min(4, h / 2); const p = el('path', {d: h <= 0 ? '' : `M${x} ${y + h} V${y + r} a${r} ${r} 0 0 1 ${r} -${r} h${bw - 2 * r} a${r} ${r} 0 0 1 ${r} ${r} V${y + h} Z`}, svg); p.style.fill = s.color; return p; });
+      if (i % lblEvery === 0) el('text', {x: m.l + band * i + band / 2, y: H - 4, 'text-anchor': 'middle'}, svg).textContent = xFmt(b.t);
+      const hit = el('rect', {x: m.l + band * i, y: m.t, width: band, height: ih, fill: 'transparent'}, svg);
+      hit.addEventListener('pointerenter', () => rects.forEach(r => r.style.opacity = .7));
+      hit.addEventListener('pointermove', () => { tip.innerHTML = ''; text(tip, 'div', xFmt(b.t, true), 'tt-t'); for (const s of series) { const row = document.createElement('div'); row.className = 'row'; const k = document.createElement('i'); k.className = 'key'; k.style.background = s.color; row.appendChild(k); text(row, 'b', b[s.key] || 0); text(row, 'span', s.label); tip.appendChild(row); } const r = svg.getBoundingClientRect(); const px = (m.l + band * i + band / 2) * (r.width / W); tip.style.display = 'block'; tip.style.left = (px + 12 + 120 > r.width ? px - 132 : px + 12) + 'px'; tip.style.top = '8px'; });
+      hit.addEventListener('pointerleave', () => { tip.style.display = 'none'; rects.forEach(r => r.style.opacity = 1); });
+    });
+  }
+  function barList(box, rows, fmt = v => v) {
+    box.innerHTML = ''; const max = Math.max(1, ...rows.map(r => r.value));
+    if (!rows.length) { text(box, 'div', 'No data', 'hint'); return; }
+    for (const r of rows) { const l = text(box, 'div', r.label, 'lbl'); l.title = r.label; const tr = document.createElement('div'); tr.className = 'track'; const f = document.createElement('div'); f.className = 'fill'; f.style.width = (r.value / max * 100) + '%'; if (r.color) f.style.background = r.color; tr.appendChild(f); box.appendChild(tr); text(box, 'div', fmt(r.value), 'val'); }
+  }
+  function renderLive(cams) {
+    const cust = new Map(), staff = new Map();
+    for (const c of cams) for (const [t, n, s] of (c.series || [])) { const k = Math.floor(t); cust.set(k, (cust.get(k) || 0) + n); staff.set(k, (staff.get(k) || 0) + (s || 0)); }
+    const pts = m => [...m.entries()].sort((a, b) => a[0] - b[0]).map(([x, y]) => ({x, y}));
+    lineChart($('#liveChart'), [{label: 'customers', color: 'var(--s1)', pts: pts(cust), area: true}, {label: 'staff', color: 'var(--s2)', pts: pts(staff)}], {xFmt: (x, full) => full ? fmtClock(x) : fmtHM(x)});
+  }
+
+  // ------------------------------------------------------------ history (traffic / zone / trax)
+  async function loadHistory(force) {
+    if (!['traffic', 'zone', 'queue', 'trax', 'dashboard'].includes(tab) && !force) return;
+    lastHist = Date.now();
+    try {
+      const q = rangeQ();
+      if (tab === 'traffic' || tab === 'dashboard') { traffic = await api(`/api/traffic?${tab === 'dashboard' ? 'hours=0' : q}`); if (tab === 'traffic') renderTraffic(traffic); else renderDashboardTraffic(traffic); }
+      if (tab === 'traffic') renderDemographics(await api(`/api/demographics?${q}`));
+      if (tab === 'zone') renderZones(await api(`/api/zones?${q}`));
+      if (tab === 'queue') renderQueues(await api(`/api/queues?${q}`));
+      if (tab === 'trax') { const [sum, hist, health] = await Promise.all([api(`/api/alerts/summary?${q}`), api(`/api/alerts?hours=${rangeHours || 24}&limit=300`), api('/api/health')]); renderTrax(sum, hist, health); }
+    } catch (e) { toast('Load failed: ' + e.message); }
+  }
+  function renderDashboardTraffic(t) {
+    $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` : 'no line crossings yet: counting visits';
+    $('#kEng').textContent = t.engaged_pct + '%'; $('#kEngSub').textContent = `${t.engaged} engaged · ${t.bounced} bounced`;
+    $('#kDwell').textContent = t.avg_dwell ? fmtDur(t.avg_dwell) : '–';
+    $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings' : `${t.sales.bills} bills`;
+  }
+  function renderTraffic(t) {
+    const f = $('#funnel'); f.innerHTML = ''; const max = Math.max(1, t.walk_ins, t.visits);
+    [['Walk-ins', t.walk_ins, 100], ['Groups', t.groups, t.walk_ins ? t.groups / t.walk_ins * 100 : 0], ['Visits tracked', t.visits, t.walk_ins ? t.visits / t.walk_ins * 100 : 100], ['Engaged', t.engaged, t.visits ? t.engaged / t.visits * 100 : 0], ['Bounced', t.bounced, t.visits ? t.bounced / t.visits * 100 : 0]].forEach(([l, v, p]) => {
+      const row = document.createElement('div'); row.className = 'step'; text(row, 'span', l); const b = document.createElement('div'); b.className = 'bar'; b.style.width = (v / max * 100) + '%'; row.appendChild(b); text(row, 'span', `${v} · ${p.toFixed(0)}%`, 'pct'); f.appendChild(row);
+    });
+    $('#funnelHint').textContent = t.has_line ? `Engaged = stayed ≥ ${CFG.thresholds.engage_seconds}s. Groups = people entering within ${CFG.thresholds.group_window}s of each other.` : 'No line crossings in this period, so walk-ins are counted as tracked visits. Draw a count line across the entrance for true footfall and groups.';
+    const tiles = $('#trafficTiles'); tiles.innerHTML = '';
+    [['Walk-ins', t.walk_ins], ['Exits', t.exits], ['Engaged %', t.engaged_pct + '%'], ['Avg dwell', t.avg_dwell ? fmtDur(t.avg_dwell) : '–'], ['Peak hour', t.peak_hour ? fmtHM(t.peak_hour) : '–'], ['Conversion', t.conversion === null ? 'n/a' : t.conversion + '%']].forEach(([l, v]) => { const d = document.createElement('div'); d.className = 'tile'; text(d, 'div', l, 'label'); text(d, 'div', v, 'value'); tiles.appendChild(d); });
+    const hours = {}; t.matrix.forEach(row => row.forEach((v, h) => { hours[h] = (hours[h] || 0) + v; })); const days = t.matrix.filter(r => r.some(v => v)).length || 1;
+    barList($('#peakBars'), Object.entries(hours).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([h, v]) => ({label: `${String(h).padStart(2, '0')}:00–${String(+h + 1).padStart(2, '0')}:00`, value: +(v / days).toFixed(1)})));
+    columnChart($('#hourlyChart'), t.hourly.map(h => ({t: h.ts, in: h.walk_ins, out: h.exits})), [{key: 'in', label: 'walk-ins', color: 'var(--s1)'}, {key: 'out', label: 'exits', color: 'var(--s2)'}], {xFmt: (x, full) => (rangeHours > 24 || full) ? fmtDayHM(x) : fmtHM(x)});
+    const mx = $('#matrix'); mx.innerHTML = ''; const mmax = Math.max(1, ...t.matrix.flat()); text(mx, 'div', '', 'cl');
+    for (let h = 0; h < 24; h++) text(mx, 'div', h % 3 === 0 ? String(h).padStart(2, '0') : '', 'cl');
+    ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((d, wd) => { text(mx, 'div', d, 'rl'); t.matrix[wd].forEach((v, h) => { const c = document.createElement('div'); c.className = 'cell'; c.title = `${d} ${String(h).padStart(2, '0')}:00 · ${v} walk-ins/h`; if (v > 0) { const r = v / mmax; c.style.background = r > .66 ? 'var(--seq1)' : r > .33 ? 'var(--seq2)' : 'var(--seq3)'; } mx.appendChild(c); }); });
+  }
+  function renderDemographics(d) {
+    const total = d.with_demographics;
+    barList($('#ageBars'), d.bands.map(b => ({label: b.band, value: b.count})), v => total ? `${v} · ${(v / total * 100).toFixed(0)}%` : v);
+    $('#demoHint').textContent = total ? `Faces seen for ${d.with_demographics} of ${d.total_visits} visits (${d.coverage_pct}%).` : (S && S.demographics && !S.demographics.available ? 'Face models not loaded: check the server log.' : 'No faces seen yet. Demographics need a camera that sees faces, ideally at the entrance.');
+    const g = d.gender; const tiles = $('#genderTiles'); tiles.innerHTML = '';
+    [['Men', total ? g.male_pct + '%' : '–'], ['Women', total ? g.female_pct + '%' : '–'], ['Average age', d.avg_age ?? '–']].forEach(([l, v]) => { const t = document.createElement('div'); t.className = 'tile'; text(t, 'div', l, 'label'); text(t, 'div', v, 'value'); tiles.appendChild(t); });
+    barList($('#genderBars'), [{label: 'Men', value: g.male}, {label: 'Women', value: g.female, color: 'var(--s2)'}]);
+    const tb = $('#ageGenderRows'); tb.innerHTML = '';
+    for (const b of d.bands) { const tr = document.createElement('tr'); text(tr, 'td', b.band); text(tr, 'td', b.male, 'num'); text(tr, 'td', b.female, 'num'); text(tr, 'td', b.count ? b.engaged_pct + '%' : '–', 'num'); text(tr, 'td', b.count ? fmtDur(b.avg_dwell) : '–', 'num'); tb.appendChild(tr); }
+  }
+  $('#btnVisits').onclick = async () => {
+    const tv = $('#visitsTable'); const show = tv.style.display === 'none'; tv.style.display = show ? 'block' : 'none'; $('#btnVisits').textContent = show ? 'Hide table' : 'Show table'; if (!show) return;
+    const rows = await api(`/api/visits?${rangeQ()}&limit=300`); const names = {}; CFG.cameras.forEach(c => names[c.id] = c.name);
+    const tbl = document.createElement('table'); const hr = tbl.createTHead().insertRow(); ['Start', 'Camera', 'Who', 'Age / gender', 'Dwell', 'Engaged', 'Entered via line', 'Zones'].forEach(h => { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); });
+    const tb = tbl.createTBody(); rows.forEach(v => { const tr = tb.insertRow(); text(tr, 'td', fmtDT(v.start_ts)); text(tr, 'td', names[v.camera_id] || v.camera_id); text(tr, 'td', v.is_staff ? 'staff' : 'customer'); text(tr, 'td', v.age_band ? `${v.age_band} · ${v.gender === 'M' ? 'man' : 'woman'}` : '–'); text(tr, 'td', fmtDur(v.dwell)); text(tr, 'td', v.is_staff ? '–' : (v.engaged ? 'yes' : 'bounced')); text(tr, 'td', v.crossed_in ? 'yes' : ''); text(tr, 'td', v.zones.join(' → ')); });
+    tv.innerHTML = ''; tv.appendChild(tbl);
+  };
+  function renderZones(z) {
+    const tb = $('#zoneRank'); tb.innerHTML = '';
+    if (!z.zones.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No zones drawn yet. Open a camera on the Dashboard and draw zones.', 'hint'); td.colSpan = 10; tb.appendChild(tr); }
+    for (const r of z.zones) { const tr = document.createElement('tr'); text(tr, 'td', r.zone); text(tr, 'td', r.camera); text(tr, 'td', r.role); text(tr, 'td', r.footfall, 'num'); text(tr, 'td', r.unique, 'num'); text(tr, 'td', r.avg_dwell ? fmtDur(r.avg_dwell) : '–', 'num'); text(tr, 'td', r.engaged_pct + '%', 'num'); text(tr, 'td', r.share_pct + '%', 'num'); text(tr, 'td', r.to_checkout_pct === null ? '–' : r.to_checkout_pct + '%', 'num'); const td = document.createElement('td'); if (r.temp) text(td, 'span', r.temp, 'chip ' + r.temp); tr.appendChild(td); tb.appendChild(tr); }
+    barList($('#zoneBars'), z.zones.filter(r => r.role !== 'staff').map(r => ({label: r.zone, value: r.footfall})));
+    const jt = $('#journeys'); jt.innerHTML = '';
+    if (!z.transitions.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No zone-to-zone movements recorded yet.', 'hint'); td.colSpan = 4; jt.appendChild(tr); }
+    for (const t of z.transitions) { const tr = document.createElement('tr'); text(tr, 'td', t.camera); text(tr, 'td', t.from); text(tr, 'td', t.to); text(tr, 'td', t.count, 'num'); jt.appendChild(tr); }
+  }
+  let heatTimer = null;
+  function renderHeatGrid() {
+    const g = $('#heatGrid'); g.innerHTML = ''; clearInterval(heatTimer);
+    const cams = S ? Object.values(S.cameras) : [];
+    if (!cams.length) { text(g, 'div', 'No cameras running', 'hint'); return; }
+    const imgs = cams.map(c => { const card = document.createElement('div'); card.className = 'cam'; card.style.cursor = 'default'; const img = document.createElement('img'); img.alt = c.name; card.appendChild(img); const meta = document.createElement('div'); meta.className = 'meta'; text(meta, 'b', c.name); card.appendChild(meta); g.appendChild(card); return [img, c.camera_id]; });
+    const refresh = () => { if (tab !== 'zone') { clearInterval(heatTimer); return; } imgs.forEach(([img, id]) => img.src = `/snapshot/${id}.jpg?mode=raw&heat=1&width=640&t=${Date.now()}`); };
+    refresh(); heatTimer = setInterval(refresh, 10000);
+  }
+  function renderQueueLive() {
+    const box = $('#queueLive'); box.innerHTML = ''; let any = false, breach = false;
+    for (const c of Object.values(S ? S.cameras : {})) for (const z of (c.zones || [])) {
+      if (z.role !== 'queue') continue; any = true; breach = breach || z.queue_breach;
+      const t = document.createElement('div'); t.className = 'tile'; text(t, 'div', `${z.name} · ${c.name}`, 'label');
+      text(t, 'div', `${z.count} waiting`, 'value'); text(t, 'div', z.count ? `longest ${fmtDur(z.max_wait)} · avg ${fmtDur(z.avg_wait)}` : 'nobody waiting', 'sub');
+      const st = text(t, 'div', z.queue_breach ? `BREACH for ${fmtDur(z.breach_for)} · open another till` : 'OK', 'chip ' + (z.queue_breach ? 'crit' : 'good')); st.style.marginTop = '6px'; box.appendChild(t);
+    }
+    $('#queueHint').textContent = any ? (breach ? 'Queue breach in progress' : `Breach when ≥ ${CFG.thresholds.queue_max} wait for ${CFG.thresholds.queue_seconds}s`) : 'No queue zones yet: open a camera on the Dashboard, draw a zone where customers line up and give it the role "queue".';
+    if (!any) text(box, 'div', 'No queue zones configured.', 'hint');
+  }
+  function renderQueues(d) {
+    const tb = $('#queueRows'); tb.innerHTML = '';
+    if (!d.queues.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No queue zones configured.', 'hint'); td.colSpan = 9; tb.appendChild(tr); }
+    for (const q of d.queues) { const tr = document.createElement('tr'); text(tr, 'td', q.zone); text(tr, 'td', q.camera); text(tr, 'td', q.served, 'num'); text(tr, 'td', q.served ? fmtDur(q.avg_wait) : '–', 'num'); text(tr, 'td', q.served ? fmtDur(q.max_wait) : '–', 'num'); text(tr, 'td', q.avg_len, 'num'); text(tr, 'td', q.max_len, 'num'); text(tr, 'td', q.breaches, 'num'); text(tr, 'td', q.breach_minutes ? q.breach_minutes + ' min' : '–', 'num'); tb.appendChild(tr); }
+    const binMin = rangeHours === 0 || rangeHours <= 1 ? 1 : rangeHours <= 6 ? 5 : rangeHours <= 24 ? 20 : 120;
+    const colors = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)']; const legend = $('#queueLegend'); legend.innerHTML = '';
+    const seriesList = Object.entries(d.series).slice(0, 4).map(([key, rows], i) => {
+      const map = new Map(); for (const r of rows) { const b = Math.floor(r.ts / (binMin * 60)) * binMin * 60; const e = map.get(b) || {sum: 0, n: 0}; e.sum += r.avg_len; e.n++; map.set(b, e); }
+      const label = key.split('/')[1]; const sp = document.createElement('span'); const sw = document.createElement('i'); sw.style.background = colors[i]; sp.appendChild(sw); sp.append(label); legend.appendChild(sp);
+      return {label, color: colors[i], pts: [...map.entries()].sort((a, b) => a[0] - b[0]).map(([x, e]) => ({x, y: +(e.sum / e.n).toFixed(1)}))};
+    });
+    lineChart($('#queueChart'), seriesList, {xFmt: (x, full) => (rangeHours > 24 || full) ? fmtDayHM(x) : fmtHM(x)});
+  }
+  function renderTrax(sum, hist, health) {
+    barList($('#alertBars'), Object.entries(sum.counts).map(([k, v]) => ({label: ALERT_LABEL[k] || k, value: v.total})));
+    const st = S ? S.store : {}; const tiles = $('#dayTiles'); tiles.innerHTML = '';
+    [['Hours', `${CFG.store.open_time}–${CFG.store.close_time}`], ['First person', st.opened_at ? fmtHM(st.opened_at) : '–'], ['Last person', st.last_presence ? fmtHM(st.last_presence) : '–'], ['Open alerts', sum.open]].forEach(([l, v]) => { const d = document.createElement('div'); d.className = 'tile'; text(d, 'div', l, 'label'); text(d, 'div', v, 'value'); tiles.appendChild(d); });
+    const rules = $('#sopRules'); rules.innerHTML = ''; const thr = CFG.thresholds;
+    const zones = CFG.cameras.flatMap(c => c.zones.map(z => ({...z, cam: c.name}))); const has = role => zones.some(z => z.role === role); const staffOn = has('staff') || ((CFG.staff && CFG.staff.uniforms) || []).length > 0 || (CFG.staff && CFG.staff.after_minutes > 0);
+    [[has('queue'), `Queue breach: > ${thr.queue_max - 1} people in a queue zone for ${thr.queue_seconds}s`, 'draw a zone with role "queue"'],
+     [staffOn && (has('display') || has('checkout')), `Unattended customer: ${thr.unattended_seconds}s in a display/checkout zone with no staff nearby`, 'set up staff detection plus display/checkout zones'],
+     [staffOn || thr.phone_everyone, `Phone usage: ${thr.phone_seconds}s holding a phone (${thr.phone_everyone ? 'everyone' : 'staff'})`, 'set up staff detection or enable "phone alerts for customers too"'],
+     [staffOn, `Staff detection: ${[has('staff') ? 'staff zone' : '', (CFG.staff.uniforms || []).length ? 'uniform colour' : '', CFG.staff.after_minutes > 0 ? `present > ${CFG.staff.after_minutes} min` : ''].filter(Boolean).join(', ') || 'off'}`, 'draw a staff zone, learn a uniform, or set the long-presence minutes'],
+     [true, `Crowd: ≥ ${thr.crowd_threshold} customers on one camera`, ''], [true, `Lingering: a visitor present ≥ ${fmtDur(thr.loiter_seconds)}`, ''],
+     [true, 'Camera offline > 1 min', ''], [true, `Store open/close vs ${CFG.store.open_time}–${CFG.store.close_time} (+${CFG.store.grace_minutes} min grace)`, '']]
+      .forEach(([on, label, fix]) => { const row = document.createElement('div'); row.className = 'ev'; row.style.gridTemplateColumns = 'auto 1fr'; text(row, 'span', on ? 'ON' : 'OFF', 'chip ' + (on ? 'good' : '')); text(row, 'span', label + (on || !fix ? '' : ` — ${fix}`)); rules.appendChild(row); });
+    const tb = $('#alertRows'); tb.innerHTML = '';
+    if (!hist.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No alerts in this period', 'hint'); td.colSpan = 7; tb.appendChild(tr); }
+    for (const a of hist) { const tr = document.createElement('tr'); text(tr, 'td', fmtDT(a.started)); const td = document.createElement('td'); text(td, 'span', ALERT_LABEL[a.type] || a.type, 'chip ' + (ALERT_CLS[a.type] || '')); tr.appendChild(td); text(tr, 'td', a.camera || ''); text(tr, 'td', a.zone || ''); text(tr, 'td', a.message); text(tr, 'td', a.resolved ? fmtDur(a.resolved - a.started) : 'open'); text(tr, 'td', a.acked ? 'yes' : ''); tb.appendChild(tr); }
+    const hb = $('#healthRows'); hb.innerHTML = '';
+    for (const h of health.cameras) { const tr = document.createElement('tr'); text(tr, 'td', h.name); const td = document.createElement('td'); text(td, 'span', !h.enabled ? 'disabled' : h.connected ? 'online' : 'offline', 'chip ' + (!h.enabled ? '' : h.connected ? 'good' : 'crit')); tr.appendChild(td); text(tr, 'td', h.uptime_pct + '%', 'num'); text(tr, 'td', h.outages, 'num'); text(tr, 'td', h.fps, 'num'); text(tr, 'td', h.inference_fps, 'num'); text(tr, 'td', h.error || ''); hb.appendChild(tr); }
+    if (S) renderOpenAlerts(S.open_alerts, $('#traxOpen'), true);
+  }
+
+  // ------------------------------------------------------------ settings
+  const formToObj = f => { const o = {}; for (const i of f.querySelectorAll('input,select')) { if (!i.name) continue; o[i.name] = i.type === 'checkbox' ? i.checked : i.type === 'number' ? (i.value === '' ? 0 : +i.value) : i.value; } return o; };
+  const fillForm = (f, obj) => { for (const i of f.querySelectorAll('input,select')) { if (!(i.name in obj)) continue; if (i.type === 'checkbox') i.checked = !!obj[i.name]; else i.value = obj[i.name] ?? ''; } };
+  function renderSettings() {
+    fillForm($('#fStore'), CFG.store); fillForm($('#fThr'), CFG.thresholds); fillForm($('#fNotify'), CFG.notifications); fillForm($('#fReport'), CFG.report); fillForm($('#fDemo'), CFG.demographics || {}); fillForm($('#fStaff'), CFG.staff || {}); renderUniforms(); renderCE();
+    const nt = $('#notifyTypes'); nt.innerHTML = ''; Object.entries(ALERT_LABEL).forEach(([k, l]) => { const lab = document.createElement('label'); lab.className = 'check'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = k; cb.checked = (CFG.notifications.types || []).includes(k); lab.appendChild(cb); lab.append(' ' + l); nt.appendChild(lab); });
+    if (!$('#fSales input[name=date]').value) $('#fSales input[name=date]').value = new Date().toISOString().slice(0, 10);
+    renderCamRows(); loadSales();
+  }
+  async function renderCamRows() {
+    const cams = await api('/api/cameras'); const tb = $('#camRows'); tb.innerHTML = '';
+    $('#btnAddCam').style.display = (CFG.congruence || {}).managed ? 'none' : '';
+    for (const c of cams) { const tr = document.createElement('tr'); text(tr, 'td', c.id); text(tr, 'td', c.name); const u = text(tr, 'td', c.url); u.style.fontSize = '12px'; u.style.color = 'var(--muted)'; const td = document.createElement('td'); text(td, 'span', !c.enabled ? 'disabled' : c.connected ? `online ${c.resolution}` : c.running ? 'connecting' : 'stopped', 'chip ' + (!c.enabled ? '' : c.connected ? 'good' : 'crit')); tr.appendChild(td); text(tr, 'td', c.line ? 'yes' : '–', 'num'); text(tr, 'td', c.zones.length, 'num'); text(tr, 'td', c.blur_faces ? 'yes' : ''); const act = document.createElement('td'); act.className = 'right'; const e = text(act, 'button', c.managed ? 'RTSP URL…' : 'Edit', 'small'); e.onclick = () => editCam(c); if (!c.managed) { act.append(' '); const d = text(act, 'button', 'Delete', 'small danger'); d.onclick = async () => { if (confirm(`Delete camera "${c.name}"?`)) { await api(`/api/cameras/${c.id}`, 'DELETE'); toast('Camera removed'); await loadConfig(); renderCamRows(); } }; } tr.appendChild(act); tb.appendChild(tr); }
+    if (!cams.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No cameras configured yet.', 'hint'); td.colSpan = 8; tb.appendChild(tr); }
+  }
+  let editingCam = null;
+  function editCam(c) { editingCam = c.id; const f = $('#fCam'); f.style.display = ''; fillForm(f, {name: c.name, id: c.id, url: c.url, user: '', password: '', target_fps: c.target_fps, enabled: c.enabled, blur_faces: c.blur_faces}); f.querySelector('[name=id]').disabled = true; const managed = !!c.managed; f.querySelector('[name=name]').disabled = managed; f.querySelector('[name=enabled]').disabled = managed; $('#camTestResult').textContent = managed ? 'This camera comes from Congruence Eye. Enter an RTSP URL only if the server has none for it (or to override it); leave it as is to keep the current one.' : 'Leave the URL as is to keep the saved credentials.'; f.scrollIntoView({behavior: 'smooth'}); }
+  $('#btnAddCam').onclick = () => { editingCam = null; const f = $('#fCam'); f.style.display = ''; f.reset(); f.querySelector('[name=id]').disabled = false; f.querySelector('[name=name]').disabled = false; f.querySelector('[name=enabled]').disabled = false; $('#camTestResult').textContent = ''; };
+  $('#btnCamCancel').onclick = () => { $('#fCam').style.display = 'none'; };
+  $('#btnTestCam').onclick = async () => { const o = formToObj($('#fCam')); $('#camTestResult').textContent = 'Testing… (up to 10 s)'; try { const r = await api('/api/cameras/test', 'POST', {url: o.url, user: o.user, password: o.password}); $('#camTestResult').textContent = r.ok ? `OK: ${r.width}×${r.height} @ ${r.fps} fps` : 'Failed: ' + r.error; } catch (e) { $('#camTestResult').textContent = 'Failed: ' + e.message; } };
+  $('#fCam').onsubmit = async e => { e.preventDefault(); const o = formToObj($('#fCam')); if (!o.id) delete o.id; try { if (editingCam) await api(`/api/cameras/${editingCam}`, 'PUT', o); else await api('/api/cameras', 'POST', o); toast('Camera saved, starting…'); $('#fCam').style.display = 'none'; await loadConfig(); renderCamRows(); } catch (err) { toast('Save failed: ' + err.message); } };
+  document.addEventListener('click', async e => {
+    const b = e.target.closest('[data-save]'); if (!b) return; const what = b.dataset.save; const f = {store: '#fStore', thresholds: '#fThr', notifications: '#fNotify', report: '#fReport', demographics: '#fDemo', staff: '#fStaff'}[what]; const o = formToObj($(f));
+    if (what === 'staff') o.uniforms = (CFG.staff && CFG.staff.uniforms) || [];
+    if (what === 'notifications') o.types = $$('#notifyTypes input:checked').map(i => i.value);
+    try { await api(`/api/config/${what}`, 'PUT', o); toast('Saved'); await loadConfig(); } catch (err) { toast('Save failed: ' + err.message); }
+  });
+  $('#btnTestNotify').onclick = async () => { $('#notifyResult').textContent = 'Sending…'; try { const r = await api('/api/notifications/test', 'POST'); $('#notifyResult').textContent = Object.entries(r).map(([k, v]) => `${k}: ${v}`).join(' · '); } catch (e) { $('#notifyResult').textContent = e.message; } };
+  $('#btnEmailReport').onclick = async () => { try { const r = await api('/api/report/email', 'POST'); toast('Report: ' + r.result); } catch (e) { toast(e.message); } };
+  $('#btnSales').onclick = async () => { const o = formToObj($('#fSales')); try { await api('/api/sales', 'POST', {date: o.date, bills: o.bills, revenue: o.revenue}); toast('Sales saved'); loadSales(); } catch (e) { toast('Save failed: ' + e.message); } };
+  async function loadSales() { const rows = await api('/api/sales'); const box = $('#salesRows'); box.innerHTML = ''; if (!rows.length) return; const tbl = document.createElement('table'); const hr = tbl.createTHead().insertRow(); ['Date', 'Bills', 'Revenue'].forEach((h, i) => { const th = document.createElement('th'); th.textContent = h; if (i) th.className = 'num'; hr.appendChild(th); }); const tb = tbl.createTBody(); rows.forEach(r => { const tr = tb.insertRow(); text(tr, 'td', r.date); text(tr, 'td', r.bills, 'num'); text(tr, 'td', r.revenue, 'num'); }); box.appendChild(tbl); }
+  $('#btnReset').onclick = async () => { if (confirm('Reset live counters, events and heatmaps on all cameras? (history in the database is kept)')) { await api('/api/reset', 'POST'); toast('Counters reset'); } };
+
+  // ------------------------------------------------------------ Congruence Eye
+  let CE = null, ceSel = {cameras: {}, zones: {}};
+  const CE_ZONE_TYPES = {display: ['SECTION', 'SHELF'], queue: ['QUEUE'], staff: ['STAFF_ONLY'], checkout: ['QUEUE', 'SECTION'], entrance: ['ENTRY_LINE', 'SECTION']};
+  function ceForm() { const f = $('#fCE'); return {enabled: f.querySelector('[name=enabled]').checked, base_url: f.querySelector('[name=base_url]').value.trim(), api_key: f.querySelector('[name=api_key]').value, managed: f.querySelector('[name=managed]').checked}; }
+  function renderCE() {
+    const c = CFG.congruence || {}; const f = $('#fCE');
+    f.querySelector('[name=enabled]').checked = !!c.enabled; f.querySelector('[name=base_url]').value = c.base_url || ''; f.querySelector('[name=api_key]').value = c.api_key || '';
+    f.querySelector('[name=managed]').checked = !!c.managed; $('#btnCESync').style.display = c.managed ? '' : 'none';
+    ceSel = {cameras: Object.assign({}, c.cameras || {}), zones: Object.assign({}, c.zones || {})};
+    renderCEMap();
+    if (!CE && c.base_url && c.api_key) ceTest(true);
+  }
+  async function ceTest(quiet) {
+    const o = ceForm(); const out = $('#ceResult'); if (!quiet) out.textContent = 'Connecting…';
+    try { CE = await api('/api/congruence/test', 'POST', {base_url: o.base_url, api_key: o.api_key}); out.textContent = `Connected: ${CE.store.name} · ${CE.cameras.length} cameras · ${CE.zones.length} zones`; }
+    catch (e) { CE = null; out.textContent = 'Failed: ' + e.message; }
+    renderCEMap();
+  }
+  function ceOption(sel, value, label, selected) { const o = document.createElement('option'); o.value = value; o.textContent = label; if (selected) o.selected = true; sel.appendChild(o); }
+  function renderManagedCams(box) {
+    const cams = CFG.cameras.filter(c => c.managed);
+    if (!cams.length) { text(box, 'div', "No cameras from Congruence Eye yet: add the store's cameras and draw their zones there (Admin), then press Sync now.", 'hint'); return; }
+    const tbl = document.createElement('table'); const hr = tbl.createTHead().insertRow();
+    ['Camera (Congruence Eye)', 'Video source', 'Count line', 'Zones', ''].forEach(h => { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); });
+    const tb = tbl.createTBody();
+    for (const c of cams) {
+      const tr = tb.insertRow(); text(tr, 'td', `${c.name} · #${c.remote_id}`).style.fontWeight = '600';
+      const src = c.url_override ? 'RTSP URL set here' : (c.url ? 'RTSP URL from Congruence Eye' : 'no RTSP URL: set one here, or link the camera to a recorder in Congruence Eye');
+      const ts = text(tr, 'td', src); if (!c.url) ts.style.color = 'var(--crit, #d33)';
+      const rl = c.remote_line; text(tr, 'td', c.line ? `yes (IN = ${rl && rl.in_direction ? rl.in_direction.toLowerCase() : '+ side'})` : '–');
+      text(tr, 'td', c.zones.length ? c.zones.map(z => `${z.name} (${z.role})`).join(', ') : '–');
+      const act = tr.insertCell(); act.className = 'right'; const b = text(act, 'button', 'RTSP URL…', 'small'); b.onclick = () => editCam(c);
+    }
+    box.appendChild(tbl);
+    text(box, 'div', 'Cameras, the count line and zones are drawn in Congruence Eye › Admin and applied here every 5 minutes or on "Sync now". The hand-made layout from before is kept in data/config.pre-managed.json.', 'hint mt');
+  }
+  function renderCEMap() {
+    const box = $('#ceMap'); box.innerHTML = '';
+    if ((CFG.congruence || {}).managed) { renderManagedCams(box); return; }
+    if (!CE) { text(box, 'div', "Test the connection to load the store's cameras and zones, then map this app's cameras and zones to them.", 'hint'); return; }
+    const tbl = document.createElement('table'); const hr = tbl.createTHead().insertRow();
+    ['This app', 'Kind', 'Sends to (Congruence Eye)'].forEach(h => { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); });
+    const tb = tbl.createTBody();
+    for (const cam of CFG.cameras) {
+      const tr = tb.insertRow(); text(tr, 'td', cam.name).style.fontWeight = '600'; text(tr, 'td', 'camera');
+      const sel = document.createElement('select'); ceOption(sel, '', '— not sent —', !ceSel.cameras[cam.id]);
+      CE.cameras.forEach(rc => ceOption(sel, rc.id, `${rc.name} (${String(rc.type || '').toLowerCase()})`, String(ceSel.cameras[cam.id]) === String(rc.id)));
+      sel.onchange = () => { if (sel.value) ceSel.cameras[cam.id] = +sel.value; else delete ceSel.cameras[cam.id]; renderCEMap(); };
+      tr.insertCell().appendChild(sel);
+      const rcid = ceSel.cameras[cam.id];
+      for (const z of cam.zones) {
+        const zr = tb.insertRow(); text(zr, 'td', '↳ ' + z.name); text(zr, 'td', z.role + ' zone');
+        const key = `${cam.id}/${z.name}`; const cell = zr.insertCell();
+        if (!rcid) { text(cell, 'span', 'map the camera first', 'hint'); continue; }
+        const want = CE_ZONE_TYPES[z.role] || []; const zones = CE.zones.filter(rz => String(rz.camera_id) === String(rcid));
+        const zs = document.createElement('select'); ceOption(zs, '', zones.length ? '— not sent —' : 'no zones on that camera in Congruence Eye', !ceSel.zones[key]);
+        zones.forEach(rz => ceOption(zs, rz.id, `${rz.name} (${String(rz.type || '').toLowerCase()})${want.length && !want.includes(rz.type) ? ' – different type' : ''}`, String(ceSel.zones[key]) === String(rz.id)));
+        zs.onchange = () => { if (zs.value) ceSel.zones[key] = +zs.value; else delete ceSel.zones[key]; };
+        cell.appendChild(zs);
+      }
+    }
+    box.appendChild(tbl);
+    text(box, 'div', `Store: ${CE.store.name}${CE.store.code ? ' (' + CE.store.code + ')' : ''}. Walk-ins count on a camera mapped to an ENTRANCE camera; queues need queue zones mapped to QUEUE zones; zone visits need display zones mapped to SECTION zones.`, 'hint mt');
+  }
+  function renderCEPill(ce) {
+    const p = $('#cePill'); if (!ce || !ce.enabled) { p.style.display = 'none'; return; }
+    p.style.display = ''; let label, cls;
+    if (!ce.configured) { label = 'Congruence Eye: not configured'; cls = 'warn'; }
+    else if (ce.online === true && !ce.last_error) { label = 'Congruence Eye: connected' + (ce.store ? ' · ' + ce.store : ''); cls = 'good'; }
+    else if (ce.online === null || ce.online === undefined) { label = 'Congruence Eye: connecting…'; cls = ''; }
+    else { label = 'Congruence Eye: ' + (ce.online === false ? 'offline' : 'error'); cls = 'crit'; }
+    p.textContent = label + (ce.backlog ? ` · ${ce.backlog} queued` : ''); p.className = 'pill ' + cls;
+    const st = $('#ceStatus'); if (!st || tab !== 'settings') return;
+    const s = ce.sent || {};
+    st.textContent = (ce.last_error ? `Last error: ${ce.last_error}. ` : '') + `Sent: ${s.events || 0} visitor events, ${s.queue || 0} queue snapshots, ${s.heatmap || 0} heatmaps, ${s.storeops || 0} store-ops, ${s.detections || 0} detections, ${s.snapshot || 0} snapshots, ${s.heartbeat || 0} heartbeats · queued ${ce.backlog || 0}` + (ce.dead ? ` · rejected by server ${ce.dead}` : '') + (ce.last_ok ? ` · last OK ${new Date(ce.last_ok * 1000).toLocaleTimeString()}` : '');
+    const sy = ce.sync;
+    if (sy && sy.managed) st.textContent += ` · managed: ${sy.last_sync ? 'last sync ' + new Date(sy.last_sync * 1000).toLocaleTimeString() : 'not synced yet'}` + (sy.last_error ? ` (error: ${sy.last_error})` : '') + (sy.needs_url && sy.needs_url.length ? ` · ${sy.needs_url.length} camera(s) need an RTSP URL` : '');
+  }
+  $('#btnCESync').onclick = async () => {
+    const out = $('#ceResult'); out.textContent = 'Syncing…';
+    try { const r = await api('/api/congruence/sync', 'POST'); out.textContent = `Synced: ${r.cameras} camera(s) (+${r.added} ~${r.updated} -${r.removed})` + (r.needs_url && r.needs_url.length ? ` · ${r.needs_url.length} without RTSP URL` : ''); toast('Synced with Congruence Eye'); await loadConfig(); renderCamRows(); }
+    catch (e) { out.textContent = 'Sync failed: ' + e.message; }
+  };
+  $('#btnCETest').onclick = () => ceTest(false);
+  $('#btnCESave').onclick = async () => { const o = ceForm(); o.cameras = ceSel.cameras; o.zones = ceSel.zones; try { await api('/api/config/congruence', 'PUT', o); toast('Congruence Eye settings saved'); await loadConfig(); } catch (e) { toast('Save failed: ' + e.message); } };
+
+  // ------------------------------------------------------------ boot
+  loadConfig().then(() => { connect(); loadHistory(true); });
+  window.addEventListener('resize', () => { if (S) renderLive(Object.values(S.cameras)); if (tab === 'traffic' && traffic) renderTraffic(traffic); });
+})();
+</script>
+</body>
+</html>
