@@ -189,17 +189,38 @@ duplicate data. The header shows the connection state, and the Settings card sho
 ## Staff recognition with a learned model
 
 Colour rules alone miss uniforms with small prints (measured on a day of captures: 34 % recall). A small image
-classifier trained on labelled person crops does much better (88-94 % on frames it never saw):
+classifier trained on labelled person crops does much better, provided the labels are varied enough (see below):
 
 ```bat
 .venv\Scripts\python tools\staff_train.py --build datasets\labels.csv --frames "<folder with captured frames>"
 .venv\Scripts\python tools\staff_train.py --train
 ```
 
-`labels.csv` has `file,x1,y1,x2,y2,label` (pixel box of a person, label `staff` or `customer`). Training writes
-`models\staff_cls.pt`; the engine loads it at start and uses it before the colour rules (Settings › Staff detection
-shows "learned uniform model"). Copy that file to every store of the same chain: no training needed there. A chain
-with a different uniform labels ~150 crops from its own captures and trains once.
+`labels.csv` has `file,x1,y1,x2,y2,label` (pixel box of a person, label `staff` or `customer`) and optionally
+`split` (`train` / `val`); `file` may include a sub-folder per day. Training writes `models\staff_cls.pt`; the
+engine uses it before the colour rules (Settings › Staff detection shows "learned uniform model") and **reloads
+it by itself when the file changes**, so a retrain needs no restart. Copy the file to every store of the same
+chain: no training needed there.
+
+What the training set must contain (learned on 2026-10-12, when a model trained on 150 crops of one day called
+19 % of unseen customers staff, because every customer in it happened to wear light clothes):
+
+- **customers in dark clothing**, in black long-sleeved shirts, with black bags or scarves: without them the model
+  learns "dark top = staff";
+- **crops where no uniform can be seen**, labelled `customer`: people seen from straight above at the door (the
+  crop is mostly hair) and heavily hidden people. The model must need positive evidence of the uniform;
+- more than one day and, if the PC is ever pointed at another site, people from that scene too;
+- only clear cases. A plain dark top that might be the uniform is left out, not guessed;
+- a validation split by time (the last part of each day), so the score is measured on people it has not seen.
+
+`datasets\staff_labels_2026-10-12.csv` (1218 boxes over three days) is the current label file; the frames are the
+snapshots the engine uploads to Congruence Eye (`App_Data\uploads\snapshots\<store>\<day>`, faces blurred). The
+classifier never sees faces: the head band of every crop is pixelated, in training and live.
+
+A staff zone still promotes anyone standing in it, but when the model clearly sees no uniform it waits 30 times
+longer (10 minutes instead of 20 s): a customer leaning on a counter has hidden feet, so their position falls on
+the counter top, inside a staff zone drawn over it. Draw staff zones on the floor behind the counter, not over
+the counter.
 
 ## Tests and tooling
 

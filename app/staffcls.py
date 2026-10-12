@@ -136,5 +136,18 @@ class BrandClassifier:
             log.debug("brand classifier failed: %s", e)
             return None
 
+    def customer_prob(self, frame: np.ndarray, bbox: tuple) -> float | None:
+        """P(customer) from the brand model: a second, independently trained opinion on whether this is staff at all."""
+        crop = upper_body(frame, bbox)
+        if crop is None:
+            return None
+        try:
+            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            probs = r.probs.data.float().cpu().tolist()
+            idx = next((i for i, n in self.names.items() if n.lower() == "customer"), None)
+            return float(probs[idx]) if idx is not None else None
+        except Exception:
+            return None
+
     def info(self) -> dict:
         return {"loaded": True, "file": str(self.path), "trained": self.mtime, "brands": self.brands, "samples": self.samples}

@@ -6,6 +6,7 @@ from pathlib import Path
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
+_fault_log = None   # kept open for faulthandler for the life of the process
 
 
 def setup_logging() -> None:
@@ -23,6 +24,12 @@ def setup_logging() -> None:
     if had_console:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=handlers)
+    # a crash inside a native library (CUDA, OpenCV, FFmpeg) kills the process without a Python traceback; under
+    # pythonw.exe nothing would be left behind, so the interpreter writes the thread stacks to logs/cam.fault.log
+    import faulthandler
+    global _fault_log
+    _fault_log = open(LOG_DIR / "cam.fault.log", "a", buffering=1, encoding="utf-8", errors="replace")
+    faulthandler.enable(file=_fault_log, all_threads=True)
 
 
 if __name__ == "__main__":

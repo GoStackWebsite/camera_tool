@@ -56,6 +56,13 @@ def hue_distance(a: float, b: float) -> float:
 
 BRAND_MIN_PX = 40            # logo pixels of one brand colour on the chest (summed over samples) before the brand is known
 BRAND_MIN_VOTES = 2.5        # learned brand model: summed probability (~3 confident samples) before the brand is named
+CROP_MAX_OVERLAP = 0.25      # another person's box may cover at most this share of the upper-body crop for a classifier vote
+CLIPPED_MIN_HEIGHT = 0.35    # a box cut by the frame bottom and shorter than this (fraction of the frame) is not classified
+UPPER_BODY_FRACTION = 0.62   # the classifier's crop: head to hips (app/staffcls.py CROP_BOTTOM)
+MODEL_RECENT_N = 6           # promotion needs the last N samples (3 s) all at least MODEL_RECENT_MIN: no early-noise promotions
+MODEL_RECENT_MIN = 0.5
+MODEL_RECENT_DEMOTE = 0.5    # a "uniform" staff whose last N samples average this or less is a customer again (fast correction)
+MODEL_SECOND_OPINION_MAX_CUSTOMER = 0.5   # the brand model may call the person "customer" at most this much
 MODEL_MIN_SAMPLES = 10       # learned classifier: samples (0.5 s apart) before it decides anything about a person;
                              # 3 s was too quick: a customer standing beside a staff member for a moment flipped
 MODEL_STAFF_PROB = 0.80      # mean P(staff) over the last 20 samples at or above this -> staff
@@ -520,6 +527,35 @@ class Analytics:
                                  f"{self.cam.name}: visitor #{t.id} lingering for {t.dwell(now) / 60:.0f} min",
                                  self.cam.id, None, t.id)
 
+    def _crop_is_clean(self, t: Track, frame: np.ndarray) -> bool:
+        """The classifier must only see this person's own clothing: no sample when another person's box covers
+        more than CROP_MAX_OVERLAP of the upper-body crop (a customer in front of a staff member inherits the
+        polo otherwise), and none while the box is clipped by the frame bottom and short (someone entering
+        under the camera: the crop is mostly hair seen from above)."""
+        x1, y1, x2, y2 = t.bbox
+        h = frame.shape[0]
+        bh = y2 - y1
+        if y2 >= h - 2 and bh < CLIPPED_MIN_HEIGHT * h:
+            return False
+        cy2 = y1 + bh * UPPER_BODY_FRACTION
+        area = max(1.0, float((x2 - x1) * (cy2 - y1)))
+        for o in self.tracks.values():
+            if o is t or t.last_seen - o.last_seen > 1.0:
+                continue
+            ox1, oy1, ox2, oy2 = o.bbox
+            ix = min(x2, ox2) - max(x1, ox1)
+            iy = min(cy2, oy2) - max(y1, oy1)
+            if ix > 0 and iy > 0 and (ix * iy) / area > CROP_MAX_OVERLAP:
+                return False
+        return True
+
+    def _second_opinion_is_staff(self, t: Track, frame: np.ndarray) -> bool:
+        """Before promoting to staff, ask the brand model (trained separately) whether this is a customer."""
+        if self.brand_model is None:
+            return True
+        p = self.brand_model.customer_prob(frame, t.bbox)
+        return p is None or p <= MODEL_SECOND_OPINION_MAX_CUSTOMER
+
     def _vote_brand(self, t: Track, frame: np.ndarray, anchored: bool) -> None:
         """Count logo-coloured pixels on the chest for each configured brand; the dominant colour names the brand."""
         x1, y1, x2, y2 = t.bbox
@@ -772,6 +808,8 @@ class Analytics:
         plain = hsv[~marks] if 0 < np.count_nonzero(marks) <= 0.25 * len(hsv) else hsv
         mixed = float(plain[:, 2].std()) > 55        # desk + laptop + paper, not a single garment
         t.torso_anchored = anchored and not mixed
+        if not self._crop_is_clean(t, frame):
+            return                                  # contaminated or unreadable crop: no classifier vote this sample
         if self.brand_model is not None:
             if t.is_staff:                          # the learned model names the brand; it sees print, logo and cut
                 res = self.brand_model.brand(frame, t.bbox)
@@ -794,8 +832,18 @@ class Analytics:
                 t.model_votes.append(prob)
                 n = len(t.model_votes)
                 mean = sum(t.model_votes) / n
-                if not t.is_staff and n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB:
+                recent = list(t.model_votes)[-MODEL_RECENT_N:]
+                if (not t.is_staff and n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB
+                        and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN
+                        and self._second_opinion_is_staff(t, frame)):
+                    # a stable run of confident samples, not a few early ones while the person was half visible,
+                    # and the independently trained brand model must not call the person a customer
                     self._set_staff(t, now, "uniform")
+                elif t.is_staff and t.staff_reason == "uniform" and len(recent) >= MODEL_RECENT_N and sum(recent) / len(recent) <= MODEL_RECENT_DEMOTE:
+                    t.is_staff = False
+                    t.staff_reason = ""
+                    t.brand = None
+                    self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff (recent samples), counted as customer")
                 elif t.is_staff and t.staff_reason == "uniform" and n >= MODEL_MIN_SAMPLES and mean <= MODEL_CUSTOMER_PROB:
                     t.is_staff = False
                     t.staff_reason = ""
