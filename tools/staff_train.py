@@ -75,7 +75,9 @@ def build(labels_csv: Path, frames_dir: Path, val_every: int = 5, seed: int = 7)
 def train(epochs: int, imgsz: int) -> None:
     from ultralytics import YOLO
     model = YOLO("yolo11n-cls.pt")
-    res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, fliplr=0.5, degrees=5, scale=0.3,
+    # workers=2: the default starts one loader process per CPU core (about 640 MB each, 10 GB on this PC), which
+    # exhausted the machine's memory and killed the running camera engine three times on 2026-10-12
+    res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, workers=2, fliplr=0.5, degrees=5, scale=0.3,
                       hsv_h=0.01, hsv_s=0.4, hsv_v=0.4, erasing=0.2, project=str(ROOT / "runs"), name="staff_cls", exist_ok=True,
                       verbose=False, plots=False)
     best = Path(res.save_dir) / "weights" / "best.pt"

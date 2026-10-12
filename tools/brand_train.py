@@ -59,7 +59,9 @@ def build(sets: list[tuple[Path, Path]], val_every: int = 5, seed: int = 7) -> N
 def train(epochs: int, imgsz: int = 128) -> None:
     from ultralytics import YOLO
     model = YOLO("yolo11n-cls.pt")
-    res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, fliplr=0.5, degrees=5, scale=0.3, hsv_h=0.0,
+    # workers=2: ultralytics otherwise starts one data-loader process per CPU core (~640 MB each), which took the
+    # live engine down with it on the store PC
+    res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, workers=2, fliplr=0.5, degrees=5, scale=0.3, hsv_h=0.0,
                       hsv_s=0.3, hsv_v=0.4, erasing=0.2, project=str(ROOT / "runs"), name="brand_cls", exist_ok=True, verbose=False, plots=False)
     MODEL.parent.mkdir(exist_ok=True)
     shutil.copy(Path(res.save_dir) / "weights" / "best.pt", MODEL)
