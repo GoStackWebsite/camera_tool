@@ -9,6 +9,9 @@ truth and nothing is drawn or mapped by hand here:
   * SECTION / QUEUE / STAFF_ONLY zones become display / queue / staff zones (SHELF has no local equivalent);
   * the id mapping used by the connector is regenerated from the server ids.
 
+Zones can still be edited in this app's camera view: ``zone_edit`` writes the change to the server's zone API
+(``frame_to_stage`` is the inverse mapping) and runs this sync again, so the server stays the source of truth.
+
 Coordinates: the server's zone editor draws on a 16:9 stage over the snapshots this app uploads, which the
 connector letterboxes to 16:9, so the drawn points are mapped back onto the real frame here
 (``stage_to_frame``). For 16:9 cameras that mapping is the identity.
@@ -29,6 +32,7 @@ log = logging.getLogger("sync")
 
 STAGE_ASPECT = 16 / 9
 ROLE_MAP = {"SECTION": "display", "QUEUE": "queue", "STAFF_ONLY": "staff"}   # ENTRY_LINE -> count line, SHELF skipped
+ROLE_TO_TYPE = {role: ztype for ztype, role in ROLE_MAP.items()}            # zone edits written back to the server
 
 
 def is_passby_name(name) -> bool:
@@ -53,6 +57,19 @@ def stage_to_frame(p, fw: int, fh: int) -> list[float]:
     if ai >= STAGE_ASPECT:                                   # wide frame: bars top and bottom
         return [x, (y - 0.5) * (ai / STAGE_ASPECT) + 0.5]
     return [(x - 0.5) * (STAGE_ASPECT / ai) + 0.5, y]       # narrow frame: bars left and right
+
+
+def frame_to_stage(p, fw: int, fh: int) -> list[float]:
+    """Frame coordinates -> editor (16:9 stage) coordinates: the inverse of ``stage_to_frame``, clamped to
+    the stage. Used when a zone edited in the camera view is written back to the server."""
+    x, y = float(p[0]), float(p[1])
+    if fw and fh:
+        ai = fw / fh
+        if ai >= STAGE_ASPECT:
+            y = (y - 0.5) * (STAGE_ASPECT / ai) + 0.5
+        else:
+            x = (x - 0.5) * (ai / STAGE_ASPECT) + 0.5
+    return [round(min(1.0, max(0.0, x)), 4), round(min(1.0, max(0.0, y)), 4)]
 
 
 def orient_line(pts, in_direction: str | None) -> list[list[float]]:

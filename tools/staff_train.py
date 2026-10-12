@@ -9,7 +9,11 @@ Each image is the upper body of one person (head to hips), any size.
     .venv\\Scripts\\python tools\\staff_train.py --train [--epochs 40] [--imgsz 128]  # -> models/staff_cls.pt
     .venv\\Scripts\\python tools\\staff_train.py --eval                                # accuracy on val/
 
-labels.csv columns: file, x1, y1, x2, y2 (pixel box of the person in <frames>/<file>), label (staff|customer).
+labels.csv columns: file, x1, y1, x2, y2 (pixel box of the person in <frames>/<file>), label (staff|customer),
+and optionally split (train|val). `file` may contain sub-folders (2026-10-12/cam31-....jpg). Without a split
+column every fifth frame goes to validation; with one, the caller decides (e.g. the last part of each day, so
+validation people are not the ones trained on). Label only what is clearly the uniform or clearly not:
+ambiguous dark tops are better left out than guessed.
 The model is a YOLO11n classification network fine-tuned on these crops; the engine loads models/staff_cls.pt
 automatically (Settings › Staff detection shows "learned model"). Copy that one file to another store of the
 same chain and no training is needed there; a chain with a different uniform re-runs --build/--train on its
@@ -25,18 +29,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 DATA = ROOT / "datasets" / "staff"
 MODEL = ROOT / "models" / "staff_cls.pt"
 CROP_TOP, CROP_BOTTOM = 0.0, 0.62          # upper body: head to hips (the uniform tee, print on front or back)
 
 
 def upper_body(im, box):
-    x1, y1, x2, y2 = box
-    h = y2 - y1
-    y2 = int(y1 + h * CROP_BOTTOM)
-    pad = int((x2 - x1) * 0.08)
-    x1, x2 = max(0, x1 - pad), min(im.shape[1], x2 + pad)
-    return im[int(y1 + h * CROP_TOP):y2, x1:x2]
+    """Exactly the crop the engine classifies (app/staffcls.py), head band pixelated."""
+    from app.staffcls import mask_head, upper_body as engine_crop
+    crop = engine_crop(im, box)
+    return mask_head(crop) if crop is not None else im[0:0, 0:0]
 
 
 def build(labels_csv: Path, frames_dir: Path, val_every: int = 5, seed: int = 7) -> None:
@@ -58,10 +61,13 @@ def build(labels_csv: Path, frames_dir: Path, val_every: int = 5, seed: int = 7)
         crop = upper_body(im, tuple(int(float(r[k])) for k in ("x1", "y1", "x2", "y2")))
         if crop.size == 0 or crop.shape[0] < 16 or crop.shape[1] < 12:
             continue
-        split = "val" if r["file"] in val_files else "train"
+        split = (r.get("split") or "").strip().lower()
+        if split not in ("train", "val"):
+            split = "val" if r["file"] in val_files else "train"
         out = DATA / split / label
         out.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out / f"{Path(r['file']).stem}_{i}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        day = Path(r["file"]).parent.name
+        cv2.imwrite(str(out / f"{day + '_' if day else ''}{Path(r['file']).stem}_{i}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
         n[split] += 1
     print(f"dataset built: {n['train']} train, {n['val']} val crops in {DATA}")
 

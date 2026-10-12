@@ -9,13 +9,14 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date, datetime
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import socket
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from . import zone_edit
 from .alerts import AlertManager
 from .config import (STATIC_DIR, ZONE_ROLES, CameraConfig, ConfigStore, DemographicsConfig, NotifyConfig, ReportConfig,
                      StaffConfig, StoreConfig, Thresholds, ZoneConfig, _dc, build_rtsp_url, settings, uniform_kind)
@@ -324,6 +325,89 @@ async def update_layout(cam_id: str, body: LayoutIn):
                   zones=[ZoneConfig(z.name, [[float(p[0]), float(p[1])] for p in z.points], z.role) for z in body.zones])
     await run_in_threadpool(rt.manager.update_camera, cam)
     return _camera_out(cam)
+
+
+class ZoneChangeIn(BaseModel):
+    op: str = Field(pattern="^(create|update|delete)$")
+    zone: str | None = Field(None, max_length=80)        # current name (update / delete)
+    name: str | None = Field(None, max_length=80)
+    role: str | None = Field(None, pattern="^(" + "|".join(ZONE_ROLES) + ")$")
+    points: list[tuple[float, float]] | None = Field(None, max_length=64)
+
+
+class ZoneEditIn(BaseModel):
+    changes: list[ZoneChangeIn] = Field(min_length=1, max_length=60)
+
+
+class CELoginIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+_login_fails: dict[str, list[float]] = {}     # client address -> times of recent failed sign-ins
+
+
+def _login_guard(ip: str, failed: bool = False) -> None:
+    """At most 5 failed Congruence Eye sign-ins per device in 5 minutes: this endpoint must not become a way
+    to guess passwords of a server that is otherwise only reachable from this PC."""
+    now = time.time()
+    recent = [t for t in _login_fails.get(ip, []) if now - t < 300]
+    if failed:
+        recent.append(now)
+    if recent:
+        _login_fails[ip] = recent
+    else:
+        _login_fails.pop(ip, None)
+    if len(_login_fails) > 500:
+        _login_fails.clear()
+    if not failed and len(recent) >= 5:
+        raise HTTPException(429, "too many failed sign-ins from this device: wait 5 minutes and try again")
+
+
+@app.post("/api/congruence/login")
+async def congruence_login(request: Request, body: CELoginIn):
+    """Sign in to Congruence Eye for zone editing. The token goes back to the page and is sent with each edit;
+    this app does not keep the password or the token."""
+    ip = request.client.host if request.client else "?"
+    _login_guard(ip)
+    try:
+        return await run_in_threadpool(zone_edit.ce_login, rt.config_store.config.congruence.base_url,
+                                       body.email.strip(), body.password)
+    except zone_edit.ZoneEditError as e:
+        if e.status == 401:
+            _login_guard(ip, failed=True)
+        raise HTTPException(e.status, e.message)
+
+
+@app.get("/api/congruence/session")
+async def congruence_session(x_ce_token: str | None = Header(None)):
+    """Who the page's Congruence Eye token belongs to (401 once it has expired)."""
+    try:
+        return await run_in_threadpool(zone_edit.ce_me, rt.config_store.config.congruence.base_url, x_ce_token or "")
+    except zone_edit.ZoneEditError as e:
+        raise HTTPException(e.status, e.message)
+
+
+@app.post("/api/cameras/{cam_id}/zones/edit")
+async def edit_zones(cam_id: str, body: ZoneEditIn, x_ce_token: str | None = Header(None)):
+    """Zone edits from the camera view. A managed camera's zones are changed on Congruence Eye (admin token in
+    X-CE-Token) and synced back; a hand-made camera's zones are changed here."""
+    cam = rt.config_store.config.camera(cam_id)
+    if cam is None:
+        raise HTTPException(404, "no such camera")
+    changes = [c.model_dump() for c in body.changes]
+    try:
+        if cam.managed:
+            result = await run_in_threadpool(zone_edit.apply_managed, rt.config_store, rt.connector, rt.reconciler,
+                                             cam_id, changes, x_ce_token or "")
+        elif _managed():
+            raise HTTPException(409, "this hand-made camera is switched off while Congruence Eye manages the cameras")
+        else:
+            result = await run_in_threadpool(zone_edit.apply_local, rt.config_store, rt.manager, cam_id, changes)
+    except zone_edit.ZoneEditError as e:
+        raise HTTPException(e.status, e.message)
+    cam = rt.config_store.config.camera(cam_id)
+    return {**result, "camera": _camera_out(cam) if cam else None}
 
 
 @app.post("/api/cameras/test")

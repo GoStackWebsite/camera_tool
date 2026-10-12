@@ -89,6 +89,10 @@ Supervisor log: `logs\stack.log`; server output: `logs\ce.out.log`.
    - the billing counter → *checkout*
    - where customers queue → *queue* (enables queue-breach alerts)
    - behind the counter / staff-only space → *staff* (enables staff detection, unattended-customer and phone alerts)
+   **Edit zones** (or *Edit* on a row of the zone table) changes zones afterwards, on the picture: click a
+   zone to select it, drag a corner to reshape it, drag inside to move it, click a dot on an edge to add a
+   corner, double-click a corner to remove it, rename it or change its role in the toolbar, then
+   **Save changes**. A renamed zone keeps its history.
 4. **Settings → Store**: name and opening hours (drives the open / close checks).
 5. **Settings → Notifications**: Telegram bot token + chat id, a webhook URL, or SMTP. Press *Send test*.
 6. **Settings → Daily report**: enable and set a time; or download the Excel report any time.
@@ -109,6 +113,7 @@ under Settings → Thresholds and apply live.
 | `GET /api/alerts`, `/api/alerts/summary`, `POST /api/alerts/{id}/ack\|resolve` | Alerts |
 | `GET /api/visits`, `/api/events`, `/api/timeline`, `/api/health` | Raw history |
 | `GET/POST/PUT/DELETE /api/cameras`, `PUT /api/cameras/{id}/layout`, `POST /api/cameras/test` | Camera management |
+| `POST /api/cameras/{id}/zones/edit` | Zone edits from the camera view: `{changes: [{op: create\|update\|delete, zone, name, role, points}]}`; managed cameras need `X-CE-Token` from `POST /api/congruence/login` |
 | `GET /api/config`, `PUT /api/config/{store\|thresholds\|notifications\|report}` | Configuration |
 | `POST /api/notifications/test`, `GET /api/report/daily.xlsx?day=`, `POST /api/report/email` | Notifications, reports |
 | `GET/POST /api/sales` | Daily bills for conversion |
@@ -157,8 +162,14 @@ and save, or, recommended, tick **Take cameras, count line and zones from Congru
   (camera linked to a recorder) or one entered here under **RTSP URL…**;
 - the camera's ENTRY_LINE zone becomes the count line (IN = the server's "in direction"), SECTION / QUEUE /
   STAFF_ONLY zones become display / queue / staff zones; the id mapping is generated automatically;
-- the setup is re-read every 5 minutes and on **Sync now**; drawing tools here are switched off, the
-  hand-made layout is kept in `data/config.pre-managed.json`.
+- the setup is re-read every 5 minutes and on **Sync now**; the hand-made layout is kept in
+  `data/config.pre-managed.json`;
+- **Edit zones** and **Draw zone** in the camera view still work: the change is written to Congruence Eye
+  (zone shape in its 16:9 editor coordinates, name, type; *remove* switches the zone off there, so it can be
+  restored in Admin › Zones) and synced straight back, so both sides always show the same zones. Saving asks
+  for a Congruence Eye **Admin** sign-in, because the edge key cannot change zones; the password goes to the
+  Congruence Eye server only, and the sign-in lives in that browser tab until it is closed. Zone roles are
+  limited to display / queue / staff there. The count line is still changed in Congruence Eye.
 
 Snapshots are uploaded letterboxed to 16:9 so the server's zone editor shows the whole frame and its
 coordinates map back exactly, whatever the camera's aspect ratio.
@@ -195,6 +206,8 @@ with a different uniform labels ~150 crops from its own captures and trains once
 - `tools\e2e_test.py` replays a recorded day of real visits into an isolated Congruence Eye test store and checks
   traffic, demographics, zones, queue, AI detections with evidence snapshots, live, store-ops and infra health
   through the analytics API (report in `logs\e2e_report.json`).
+- `tools\test_zone_edit.py` checks zone editing offline (hand-made camera, and a managed camera against a
+  throwaway Congruence Eye look-alike): no cameras, server or credentials needed.
 - `mcp_server\` is an MCP server ("congruence-eye") for Claude: analyse all stores, engine status, feature audit,
   staff recognition report, train/evaluate the staff model. See `mcp_server\README.md`.
 - `docs\market-comparison.md` compares the platform with RetailNext, Sensormatic ShopperTrak, V-Count and Tango Eye

@@ -41,3 +41,9 @@ yolo11n-cls.pt
 data/pos_inbox/
 data/clips/
 datasets/*.mp4
+
+# person crops used for training (never commit images of people)
+datasets/brand/
+datasets/*.cache
+# the portable brand model travels with the staff model
+!models/brand_cls.pt

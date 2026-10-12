@@ -69,6 +69,7 @@
   .cam .meta { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 12px; }
   .video-wrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16/9; } .video-wrap img { width: 100%; height: 100%; display: block; object-fit: contain; }
   .video-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; } .video-wrap canvas.drawing { cursor: crosshair; }
+  .video-wrap canvas.editing { touch-action: none; } button:disabled { opacity: .45; cursor: default; }
   .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; } .toolbar .sep { width: 1px; height: 22px; background: var(--border); }
   .chart { position: relative; } .chart svg { width: 100%; height: 190px; display: block; overflow: visible; } .chart svg text { font-size: 11px; fill: var(--muted); }
   .tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.25); display: none; z-index: 2; min-width: 110px; }
@@ -141,13 +142,24 @@
             <a id="btnSnap" href="#" target="_blank"><button>Snapshot</button></a>
             <span class="sep"></span>
             <button id="btnLine">Draw count line</button><button id="btnSwap">Swap IN/OUT</button>
-            <button id="btnZone">Draw zone</button>
+            <button id="btnZone">Draw zone</button><button id="btnEdit" title="Reshape, rename, change the role of or remove the zones on this camera">Edit zones</button>
             <input id="zoneName" placeholder="Zone name" style="display:none;width:130px">
             <select id="zoneRole" style="display:none"><option value="display">display / product area</option><option value="entrance">entrance</option><option value="checkout">checkout / counter</option><option value="queue">queue</option><option value="staff">staff area</option></select>
             <button id="btnFinish" style="display:none" class="primary">Finish zone</button><button id="btnCancel" style="display:none">Cancel</button>
+            <input id="edName" maxlength="40" placeholder="Zone name" title="Name of the selected zone" style="display:none;width:150px"><select id="edRole" title="Role of the selected zone" style="display:none"></select>
+            <button id="btnEdDelPt" style="display:none" title="Remove the highlighted corner (double-clicking a corner does the same)">Remove corner</button><button id="btnEdDelZone" style="display:none" class="danger">Delete zone</button>
+            <button id="btnEdSave" style="display:none" class="primary">Save changes</button><button id="btnEdCancel" style="display:none">Cancel</button>
             <span class="sep"></span><button id="btnClearLine">Clear line</button><button id="btnClearZones">Clear zones</button>
           </div>
-          <div class="hint" id="drawHint">Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers.</div>
+          <form class="toolbar" id="ceSign" style="display:none">
+            <span class="hint" id="ceSignMsg" style="flex-basis:100%"></span>
+            <input id="ceEmail" type="email" placeholder="Congruence Eye email" autocomplete="username" style="width:210px" required>
+            <input id="cePass" type="password" placeholder="Password" autocomplete="current-password" style="width:150px" required>
+            <button id="btnCeLogin" class="primary">Sign in</button>
+            <span class="hint">The password goes to your Congruence Eye server only and is not saved here.</span>
+          </form>
+          <div class="hint mt" id="ceWho" style="display:none"></div>
+          <div class="hint mt" id="drawHint">Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers.</div>
         </div>
         <div>
           <div class="tiles">
@@ -346,7 +358,7 @@
   // ------------------------------------------------------------ state
   let CFG = {store: {}, cameras: [], thresholds: {}, notifications: {}, report: {}};
   let S = null, cfgRevs = {}, rangeHours = 0, tab = 'dashboard';
-  let detailCam = null, mode = 'annotated', heat = false, drawMode = null, drawPts = [];
+  let detailCam = null, mode = 'annotated', heat = false, drawMode = null, drawPts = [], ed = null, cePending = null;
   let traffic = null, lastHist = 0;
 
   // ------------------------------------------------------------ tabs + range
@@ -418,11 +430,12 @@
     for (const c of cams) { const card = grid.querySelector(`.cam[data-id="${CSS.escape(c.camera_id)}"]`); if (card) card.querySelector('.live').textContent = c.camera.connected ? `${c.occupancy} customers · ${c.staff} staff` : (c.camera.error || 'offline'); }
   }
   function openDetail(id) {
+    if (ed) { if (id === detailCam) return; if (!stopEdit(false)) return; }
     detailCam = id; $('#camDetail').style.display = ''; setVideo(); endDraw();
     $('#camDetail').scrollIntoView({behavior: 'smooth', block: 'start'});
     if (S && S.cameras[id]) { renderDetail(S.cameras[id]); }
   }
-  function closeDetail() { detailCam = null; $('#camDetail').style.display = 'none'; $('#detVideo').src = ''; }
+  function closeDetail() { if (ed && !stopEdit(false)) return; detailCam = null; $('#camDetail').style.display = 'none'; $('#detVideo').src = ''; }
   $('#detClose').onclick = closeDetail;
   const camCfg = () => CFG.cameras.find(c => c.id === detailCam) || {zones: [], line: null};
   function setVideo() { if (!detailCam) return; $('#detVideo').src = `/video/${detailCam}?mode=${mode}&heat=${heat ? 1 : 0}&t=${Date.now()}`; $('#btnSnap').href = `/snapshot/${detailCam}.jpg?mode=${mode}&heat=${heat ? 1 : 0}`; }
@@ -438,14 +451,14 @@
   function renderZoneRows(c) {
     const tb = $('#zoneRows'); tb.innerHTML = ''; const cfg = camCfg(); const stats = (c && c.zones) || [];
     const managed = !!cfg.managed;
-    ['#btnLine', '#btnSwap', '#btnZone', '#btnClearLine', '#btnClearZones'].forEach(sel => { const el = $(sel); if (el) el.style.display = managed ? 'none' : ''; });
-    if (managed && !drawMode) $('#drawHint').textContent = 'This camera, its count line and zones come from Congruence Eye: edit them there (Admin › Zones) and press Sync now in Settings.';
-    if (!cfg.zones.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', managed ? 'No zones for this camera in Congruence Eye yet.' : 'No zones yet. Use "Draw zone".', 'hint'); td.colSpan = 7; tb.appendChild(tr); return; }
+    renderTools();
+    if (!drawMode && !ed) $('#drawHint').textContent = defaultHint();
+    if (!cfg.zones.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No zones yet. Use "Draw zone".', 'hint'); td.colSpan = 7; tb.appendChild(tr); return; }
     for (const z of cfg.zones) {
       const st = stats.find(x => x.name === z.name) || {count: 0, staff: 0, visits: 0, avg_dwell: 0};
       const tr = document.createElement('tr'); text(tr, 'td', z.name); const td = document.createElement('td'); text(td, 'span', z.role, 'chip'); if (st.queue_breach) { td.append(' '); text(td, 'span', 'QUEUE', 'chip crit'); } if (st.unattended) { td.append(' '); text(td, 'span', 'UNATTENDED', 'chip warn'); } tr.appendChild(td);
       text(tr, 'td', st.count, 'num'); text(tr, 'td', st.staff, 'num'); text(tr, 'td', st.visits, 'num'); text(tr, 'td', st.avg_dwell ? fmtDur(st.avg_dwell) : '–', 'num');
-      const td2 = document.createElement('td'); if (!managed) { const b = text(td2, 'button', '✕', 'small'); b.title = 'Remove zone'; b.onclick = () => saveLayout({zones: cfg.zones.filter(x => x.name !== z.name)}); } tr.appendChild(td2); tb.appendChild(tr);
+      const td2 = document.createElement('td'); td2.className = 'right'; td2.style.whiteSpace = 'nowrap'; if (!ed) { const eb = text(td2, 'button', 'Edit', 'small'); eb.title = 'Reshape, rename or change the role of this zone'; eb.onclick = () => startEdit(z.name); td2.append(' '); const b = text(td2, 'button', '✕', 'small'); b.title = 'Remove zone'; b.onclick = () => removeZone(z); } tr.appendChild(td2); tb.appendChild(tr);
     }
   }
   const hsvToRgb = (h, s, v) => { const H = h * 2 / 60, S = s / 255, V = v / 255; const c = V * S, x = c * (1 - Math.abs(H % 2 - 1)), m = V - c; const [r, g, b] = H < 1 ? [c, x, 0] : H < 2 ? [x, c, 0] : H < 3 ? [0, c, x] : H < 4 ? [0, x, c] : H < 5 ? [x, 0, c] : [c, 0, x]; return `rgb(${Math.round((r + m) * 255)},${Math.round((g + m) * 255)},${Math.round((b + m) * 255)})`; };
@@ -476,24 +489,26 @@
   const toNorm = (px, py) => { const f = frameRect(); return [Math.min(1, Math.max(0, (px - f.x) / f.w)), Math.min(1, Math.max(0, (py - f.y) / f.h))]; };
   const toPx = (nx, ny) => { const f = frameRect(); return [f.x + nx * f.w, f.y + ny * f.h]; };
   function drawOverlay() {
-    const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); if (!drawMode) return;
+    const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); if (ed) { drawEditor(ctx); return; } if (!drawMode) return;
     ctx.lineWidth = 2; ctx.strokeStyle = '#ffd400'; ctx.fillStyle = '#ffd400'; const pts = drawPts.map(p => toPx(p[0], p[1]));
     if (pts.length) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); if (drawMode === 'zone' && pts.length > 2) ctx.closePath(); ctx.stroke(); pts.forEach(p => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill(); }); }
   }
   function startDraw(kind) {
+    if (ed && !stopEdit(false)) return;
     drawMode = kind; drawPts = []; overlay.classList.add('drawing');
+    if (kind === 'zone') { roleOptions($('#zoneRole'), 'display'); checkCeSession(); }
     ['#btnFinish', '#zoneName', '#zoneRole'].forEach(s => $(s).style.display = kind === 'zone' ? '' : 'none'); $('#btnCancel').style.display = '';
     $('#btnLine').classList.toggle('active', kind === 'line'); $('#btnZone').classList.toggle('active', kind === 'zone');
     $('#zoneName').value = ''; $('#zoneName').placeholder = `Zone ${camCfg().zones.length + 1}`;
     $('#drawHint').textContent = kind === 'line' ? 'Click two points across the entrance. Crossing from the OUT side to the IN side counts a walk-in; use Swap IN/OUT if it is reversed.' : 'Click the corners of the area at floor level, pick a role, then press Finish zone.';
-    drawOverlay();
+    renderTools(); renderCeSign(); drawOverlay();
   }
   function endDraw() {
     drawMode = null; drawPts = []; overlay.classList.remove('drawing');
     ['#btnFinish', '#zoneName', '#zoneRole', '#btnCancel'].forEach(s => $(s).style.display = 'none');
     $('#btnLine').classList.remove('active'); $('#btnZone').classList.remove('active');
-    $('#drawHint').textContent = 'Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers.';
-    drawOverlay();
+    $('#drawHint').textContent = defaultHint(); cePending = null;
+    renderTools(); renderCeSign(); drawOverlay();
   }
   overlay.addEventListener('pointerdown', async e => {
     if (!drawMode) return; const r = overlay.getBoundingClientRect(); drawPts.push(toNorm(e.clientX - r.left, e.clientY - r.top)); drawOverlay();
@@ -505,7 +520,9 @@
   $('#btnFinish').onclick = async () => {
     if (drawPts.length < 3) { toast('A zone needs at least 3 points.'); return; }
     const name = ($('#zoneName').value.trim() || `Zone ${camCfg().zones.length + 1}`).slice(0, 40); const role = $('#zoneRole').value;
-    const zones = camCfg().zones.filter(z => z.name !== name).concat([{name, role, points: drawPts.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)])}]);
+    const points = drawPts.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]);
+    if (needCe()) { const go = async () => { const r = await sendZoneChanges([{op: 'create', name, role, points}], go); if (!r) return; reportZoneResult(r, `Zone "${name}" added in Congruence Eye.`); if (r.applied) endDraw(); }; await go(); return; }
+    const zones = camCfg().zones.filter(z => z.name !== name).concat([{name, role, points}]);
     await saveLayout({zones}); endDraw();
   };
   $('#btnSwap').onclick = () => { const c = camCfg(); if (c.line) saveLayout({line: [c.line[1], c.line[0]]}); };
@@ -516,6 +533,265 @@
     try { await api(`/api/cameras/${detailCam}/layout`, 'PUT', body); await loadConfig(); if (S && S.cameras[detailCam]) renderZoneRows(S.cameras[detailCam]); toast('Layout saved'); }
     catch (e) { toast('Could not save: ' + e.message); }
   }
+
+  // ------------------------------------------------------------ zone editor (camera view)
+  // Reshape, rename, re-role and remove zones on the picture. A hand-made camera's zones are saved here; a
+  // camera managed by Congruence Eye is saved there (Admin sign-in, token kept for this browser tab only).
+  const ROLE_RGB = {display: '0,160,255', entrance: '90,220,90', checkout: '0,230,255', queue: '255,200,0', staff: '160,120,255'};
+  const ROLE_LABEL = {display: 'display / product area', entrance: 'entrance', checkout: 'checkout / counter', queue: 'queue', staff: 'staff area'};
+  const EDIT_HINT = 'Click a zone to select it. Drag a corner to reshape it, drag inside to move it, click a small dot on an edge to add a corner, double-click a corner to remove it. Rename it or change its role in the boxes above, then press Save changes.';
+  let ceTok = null, ceUser = null;
+  try { ceTok = sessionStorage.getItem('ceTok'); ceUser = JSON.parse(sessionStorage.getItem('ceUser') || 'null'); } catch (e) { ceTok = null; ceUser = null; }
+
+  function needCe() { return !!camCfg().managed; }
+  function ceReady() { return !!(ceTok && ceUser && ceUser.can_edit); }
+  function defaultHint() {
+    return camCfg().managed
+      ? 'This camera is managed by Congruence Eye. "Edit zones" and "Draw zone" save the zones there (Admin sign-in needed); the count line is changed in Congruence Eye › Admin › Zones.'
+      : 'Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers. "Edit zones" reshapes, renames or removes them.';
+  }
+  function setMode(m) { mode = m; $('#btnAnnot').classList.toggle('active', m === 'annotated'); $('#btnRaw').classList.toggle('active', m === 'raw'); setVideo(); }
+  function roleOptions(sel, current) {
+    const roles = needCe() ? ['display', 'queue', 'staff'] : ['display', 'entrance', 'checkout', 'queue', 'staff'];
+    if (current && !roles.includes(current)) roles.push(current);
+    if (sel.dataset.roles !== roles.join()) { sel.innerHTML = ''; roles.forEach(r => { const o = document.createElement('option'); o.value = r; o.textContent = ROLE_LABEL[r] || r; sel.appendChild(o); }); sel.dataset.roles = roles.join(); }
+    if (current) sel.value = current;
+  }
+  function renderTools() {
+    const managed = !!camCfg().managed, editing = !!ed;
+    const show = (sel, on) => { const e = $(sel); if (e) e.style.display = on ? '' : 'none'; };
+    ['#btnLine', '#btnSwap', '#btnClearLine', '#btnClearZones'].forEach(sel => show(sel, !managed && !editing));
+    show('#btnZone', !editing); show('#btnEdit', !drawMode);
+  }
+
+  // ---- talking to the server
+  const zapi = async (url, method = 'GET', body = null) => {
+    const headers = body ? {'Content-Type': 'application/json'} : {}; if (ceTok) headers['X-CE-Token'] = ceTok;
+    const res = await fetch(url, {method, headers, body: body ? JSON.stringify(body) : null});
+    let data = null; try { data = await res.json(); } catch (e) { data = null; }
+    if (!res.ok) {
+      const d = data && data.detail;
+      const err = new Error(Array.isArray(d) ? d.map(x => x.msg || JSON.stringify(x)).join('; ') : (d || `HTTP ${res.status}`));
+      err.status = res.status; throw err;
+    }
+    return data;
+  };
+  const sentence = m => m ? m.charAt(0).toUpperCase() + m.slice(1) + (/[.!?]$/.test(m) ? '' : '.') : '';
+  function setCeSession(tok, user) {
+    ceTok = tok; ceUser = user;
+    try { if (tok) { sessionStorage.setItem('ceTok', tok); sessionStorage.setItem('ceUser', JSON.stringify(user)); } else { sessionStorage.removeItem('ceTok'); sessionStorage.removeItem('ceUser'); } } catch (e) { /* private mode: the session lasts until the page reloads */ }
+    renderCeSign();
+  }
+  function renderCeSign(msg) {
+    const active = !!detailCam && needCe() && (!!ed || drawMode === 'zone' || !!cePending);
+    const ask = active && !ceReady();
+    $('#ceSign').style.display = ask ? '' : 'none';
+    if (ask) {
+      $('#ceSignMsg').textContent = msg || (ceUser && !ceUser.can_edit
+        ? `${ceUser.name} is signed in as ${String(ceUser.role).toLowerCase().replace(/_/g, ' ')} and cannot change zones. Sign in with an Admin account.`
+        : 'The zones of this camera are kept in Congruence Eye. Sign in there with an Admin account to save changes.');
+    }
+    const who = $('#ceWho'); who.style.display = active && ceReady() ? '' : 'none';
+    if (active && ceReady()) { who.textContent = `Changes are saved to Congruence Eye as ${ceUser.name}. `; const b = text(who, 'button', 'Sign out', 'small'); b.type = 'button'; b.onclick = () => setCeSession(null, null); }
+  }
+  async function checkCeSession() {
+    if (!ceTok || !needCe()) { renderCeSign(); return; }
+    try { const r = await zapi('/api/congruence/session'); ceUser = r.user; } catch (e) { if (e.status === 401) { ceTok = null; ceUser = null; try { sessionStorage.removeItem('ceTok'); sessionStorage.removeItem('ceUser'); } catch (x) { /* ignore */ } } }
+    renderCeSign();
+  }
+  $('#ceSign').onsubmit = async e => {
+    e.preventDefault();
+    const email = $('#ceEmail').value.trim(), password = $('#cePass').value; if (!email || !password) return;
+    $('#btnCeLogin').disabled = true;
+    try {
+      const r = await zapi('/api/congruence/login', 'POST', {email, password});
+      $('#cePass').value = ''; setCeSession(r.token, r.user);
+      if (!r.user.can_edit) return;
+      toast(`Signed in to Congruence Eye as ${r.user.name}.`);
+      const again = cePending; cePending = null; renderCeSign(); if (again) again();
+    } catch (err) { renderCeSign('Sign-in failed: ' + sentence(err.message)); }
+    finally { $('#btnCeLogin').disabled = false; }
+  };
+  // Sends zone changes; returns the result, or null when nothing was saved (an error was shown, or a sign-in
+  // is needed first: `retry` then runs by itself after the sign-in).
+  async function sendZoneChanges(changes, retry) {
+    const cam = detailCam;
+    if (needCe() && !ceReady()) { cePending = retry; renderCeSign(); $('#ceEmail').focus(); toast('Sign in to Congruence Eye to save.'); return null; }
+    try {
+      const r = await zapi(`/api/cameras/${cam}/zones/edit`, 'POST', {changes});
+      await loadConfig(); if (S && S.cameras[cam] && detailCam === cam) renderZoneRows(S.cameras[cam]);
+      return r;
+    } catch (err) {
+      if (needCe() && err.status === 401) { setCeSession(null, null); cePending = retry; renderCeSign(sentence(err.message)); $('#ceEmail').focus(); return null; }
+      if (needCe() && err.status === 403) { if (ceUser) ceUser.can_edit = false; cePending = retry; renderCeSign(sentence(err.message)); return null; }
+      toast('Could not save: ' + err.message); return null;
+    }
+  }
+  function reportZoneResult(r, okMsg) {
+    const errs = (r.errors || []).map(e => `${e.zone}: ${e.error}`);
+    if (errs.length) toast(`${r.applied} change${r.applied === 1 ? '' : 's'} saved. Not saved: ${errs.join(' · ')}`);
+    else if (r.synced === false) toast(`${okMsg} Congruence Eye has the change; this app picks it up at its next sync (${r.sync_error}).`);
+    else toast(r.applied ? okMsg : 'Nothing had changed.');
+  }
+  async function removeZone(z) {
+    if (!needCe()) { saveLayout({zones: camCfg().zones.filter(x => x.name !== z.name)}); return; }
+    if (!confirm(`Remove zone "${z.name}"? It is switched off in Congruence Eye and can be restored there (Admin › Zones).`)) return;
+    const go = async () => { const r = await sendZoneChanges([{op: 'delete', zone: z.name}], go); if (r) { reportZoneResult(r, `Zone "${z.name}" removed.`); renderCeSign(); } };
+    await go();
+  }
+
+  // ---- editor state
+  const zoneDirty = z => z.name.trim().replace(/\s+/g, ' ') !== z.orig || z.role !== z.origRole || z.geo;
+  const dirtyCount = () => ed ? ed.zones.filter(zoneDirty).length + ed.removed.length : 0;
+  const clamp01 = v => Math.min(1, Math.max(0, v));
+  function startEdit(selName) {
+    if (ed) { if (selName) { ed.sel = ed.zones.findIndex(z => z.orig === selName); ed.vtx = -1; renderEditBar(); drawOverlay(); } return; }
+    if (drawMode) endDraw();
+    const c = camCfg();
+    if (!c.zones.length) { toast('There are no zones on this camera yet. Use "Draw zone" first.'); return; }
+    ed = {zones: c.zones.map(z => ({orig: z.name, origRole: z.role, name: z.name, role: z.role, geo: false, points: z.points.map(p => [clamp01(p[0]), clamp01(p[1])])})), removed: [], sel: -1, vtx: -1, drag: null, prevMode: mode};
+    if (selName) ed.sel = ed.zones.findIndex(z => z.orig === selName);
+    if (mode !== 'raw') setMode('raw');          // the plain picture under the editable shapes
+    overlay.classList.add('editing'); renderTools(); renderEditBar(); checkCeSession(); drawOverlay();
+    if (S && S.cameras[detailCam]) renderZoneRows(S.cameras[detailCam]);
+  }
+  function stopEdit(force) {
+    if (!ed) return true;
+    if (!force && dirtyCount() && !confirm('Discard the zone changes that have not been saved?')) return false;
+    const prev = ed.prevMode; ed = null; cePending = null;
+    overlay.classList.remove('editing'); overlay.style.cursor = '';
+    if (prev !== mode && detailCam) setMode(prev);
+    renderTools(); renderEditBar(); renderCeSign(); $('#drawHint').textContent = defaultHint(); drawOverlay();
+    if (S && S.cameras[detailCam]) renderZoneRows(S.cameras[detailCam]);
+    return true;
+  }
+  function renderEditBar() {
+    const on = !!ed, z = on && ed.sel >= 0 ? ed.zones[ed.sel] : null;
+    ['#btnEdSave', '#btnEdCancel'].forEach(sel => $(sel).style.display = on ? '' : 'none');
+    ['#edName', '#edRole', '#btnEdDelPt', '#btnEdDelZone'].forEach(sel => $(sel).style.display = z ? '' : 'none');
+    $('#btnEdit').classList.toggle('active', on);
+    if (!on) return;
+    if (z) { if (document.activeElement !== $('#edName')) $('#edName').value = z.name; roleOptions($('#edRole'), z.role); $('#btnEdDelPt').disabled = !(ed.vtx >= 0 && z.points.length > 3); }
+    const n = dirtyCount(); $('#btnEdSave').textContent = n ? `Save changes (${n})` : 'Save changes'; $('#btnEdSave').disabled = !n;
+    $('#drawHint').textContent = EDIT_HINT;
+  }
+  function drawEditor(ctx) {
+    ed.zones.forEach((z, i) => {
+      const sel = i === ed.sel, rgb = ROLE_RGB[z.role] || ROLE_RGB.display, pts = z.points.map(p => toPx(p[0], p[1]));
+      ctx.beginPath(); pts.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+      ctx.fillStyle = `rgba(${rgb},${sel ? .3 : .13})`; ctx.fill();
+      ctx.lineWidth = sel ? 3 : 1.5; ctx.strokeStyle = `rgb(${rgb})`; ctx.setLineDash(sel ? [] : [6, 4]); ctx.stroke(); ctx.setLineDash([]);
+      const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cy = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+      const label = (z.name.trim() || 'unnamed') + (zoneDirty(z) ? ' *' : '');
+      ctx.font = `${sel ? '600 ' : ''}12px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = sel ? 'rgba(0,0,0,.8)' : 'rgba(0,0,0,.55)'; ctx.fillRect(cx - tw / 2 - 5, cy - 9, tw + 10, 18);
+      ctx.fillStyle = '#fff'; ctx.fillText(label, cx, cy);
+      if (!sel) return;
+      pts.forEach((p, k) => { const q = pts[(k + 1) % pts.length]; ctx.beginPath(); ctx.arc((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, 4, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke(); });
+      pts.forEach((p, k) => { const hot = k === ed.vtx; ctx.beginPath(); ctx.arc(p[0], p[1], hot ? 8 : 6, 0, Math.PI * 2); ctx.fillStyle = hot ? '#fff' : `rgb(${rgb})`; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = hot ? `rgb(${rgb})` : '#fff'; ctx.stroke(); });
+    });
+  }
+
+  // ---- pointer work on the picture
+  const HIT = 11;
+  const evPos = e => { const r = overlay.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const inPoly = (x, y, pts) => { let c = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+  const polyArea = pts => Math.abs(pts.reduce((a, p, i) => { const q = pts[(i + 1) % pts.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
+  // what is under the pointer: a corner or an edge dot of the selected zone first, then any corner, then the
+  // smallest zone containing the point (so a small zone lying on a big one can still be picked)
+  function editHit(px, py) {
+    const all = ed.zones.map((_, i) => i), order = ed.sel >= 0 ? [ed.sel].concat(all.filter(i => i !== ed.sel)) : all;
+    for (const i of order) {
+      const pts = ed.zones[i].points.map(p => toPx(p[0], p[1]));
+      for (let k = 0; k < pts.length; k++) if (Math.hypot(pts[k][0] - px, pts[k][1] - py) <= HIT) return {zone: i, vtx: k};
+      if (i === ed.sel) for (let k = 0; k < pts.length; k++) { const q = pts[(k + 1) % pts.length]; if (Math.hypot((pts[k][0] + q[0]) / 2 - px, (pts[k][1] + q[1]) / 2 - py) <= HIT) return {zone: i, mid: k}; }
+    }
+    const n = toNorm(px, py); let best = -1, bestArea = Infinity;
+    ed.zones.forEach((z, i) => { if (inPoly(n[0], n[1], z.points)) { const a = polyArea(z.points); if (a < bestArea) { best = i; bestArea = a; } } });
+    return best >= 0 ? {zone: best, body: true} : null;
+  }
+  function removeCorner() {
+    const z = ed && ed.sel >= 0 ? ed.zones[ed.sel] : null; if (!z || ed.vtx < 0) return;
+    if (z.points.length <= 3) { toast('A zone needs at least 3 corners.'); return; }
+    z.points.splice(ed.vtx, 1); z.geo = true; ed.vtx = -1; renderEditBar(); drawOverlay();
+  }
+  overlay.addEventListener('pointerdown', e => {
+    if (!ed || e.button > 0) return;
+    const pos = evPos(e), h = editHit(pos[0], pos[1]);
+    if (!h) { ed.sel = -1; ed.vtx = -1; renderEditBar(); drawOverlay(); return; }
+    ed.sel = h.zone; const z = ed.zones[h.zone];
+    if (h.mid !== undefined) { const a = z.points[h.mid], b = z.points[(h.mid + 1) % z.points.length]; z.points.splice(h.mid + 1, 0, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); z.geo = true; h.vtx = h.mid + 1; }
+    if (h.vtx !== undefined) { ed.vtx = h.vtx; ed.drag = {kind: 'corner'}; }
+    else { ed.vtx = -1; ed.drag = {kind: 'body', last: toNorm(pos[0], pos[1])}; }
+    try { overlay.setPointerCapture(e.pointerId); } catch (x) { /* synthetic pointer */ }
+    e.preventDefault(); renderEditBar(); drawOverlay();
+  });
+  overlay.addEventListener('pointermove', e => {
+    if (!ed) return;
+    const pos = evPos(e);
+    if (!ed.drag) { const h = editHit(pos[0], pos[1]); overlay.style.cursor = !h ? 'default' : h.body ? 'move' : h.mid !== undefined ? 'copy' : 'grab'; return; }
+    const z = ed.zones[ed.sel], n = toNorm(pos[0], pos[1]);
+    if (ed.drag.kind === 'corner') { z.points[ed.vtx] = n; z.geo = true; }
+    else {
+      const xs = z.points.map(p => p[0]), ys = z.points.map(p => p[1]);      // the whole shape stays inside the picture
+      const dx = Math.max(-Math.min(...xs), Math.min(1 - Math.max(...xs), n[0] - ed.drag.last[0]));
+      const dy = Math.max(-Math.min(...ys), Math.min(1 - Math.max(...ys), n[1] - ed.drag.last[1]));
+      if (dx || dy) { z.points = z.points.map(p => [p[0] + dx, p[1] + dy]); z.geo = true; ed.drag.last = [ed.drag.last[0] + dx, ed.drag.last[1] + dy]; }
+    }
+    drawOverlay();
+  });
+  const endDrag = e => { if (!ed || !ed.drag) return; ed.drag = null; try { overlay.releasePointerCapture(e.pointerId); } catch (x) { /* not captured */ } renderEditBar(); drawOverlay(); };
+  overlay.addEventListener('pointerup', endDrag); overlay.addEventListener('pointercancel', endDrag);
+  overlay.addEventListener('dblclick', e => { if (!ed) return; const pos = evPos(e), h = editHit(pos[0], pos[1]); if (h && h.vtx !== undefined && h.zone === ed.sel) { ed.vtx = h.vtx; removeCorner(); } });
+  overlay.addEventListener('contextmenu', e => { if (!ed) return; e.preventDefault(); const pos = evPos(e), h = editHit(pos[0], pos[1]); if (h && h.vtx !== undefined) { ed.sel = h.zone; ed.vtx = h.vtx; removeCorner(); } });
+  document.addEventListener('keydown', e => {
+    if (!ed || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && ed.vtx >= 0) { e.preventDefault(); removeCorner(); }
+    else if (e.key === 'Escape') { ed.sel = -1; ed.vtx = -1; renderEditBar(); drawOverlay(); }
+  });
+
+  // ---- editor buttons
+  $('#btnEdit').onclick = () => { if (ed) stopEdit(false); else startEdit(); };
+  $('#btnEdCancel').onclick = () => stopEdit(false);
+  $('#edName').oninput = () => { if (ed && ed.sel >= 0) { ed.zones[ed.sel].name = $('#edName').value; renderEditBar(); drawOverlay(); } };
+  $('#edRole').onchange = () => { if (ed && ed.sel >= 0) { ed.zones[ed.sel].role = $('#edRole').value; renderEditBar(); drawOverlay(); } };
+  $('#btnEdDelPt').onclick = removeCorner;
+  $('#btnEdDelZone').onclick = () => {
+    if (!ed || ed.sel < 0) return;
+    const z = ed.zones[ed.sel]; ed.removed.push(z.orig); ed.zones.splice(ed.sel, 1); ed.sel = -1; ed.vtx = -1; renderEditBar(); drawOverlay();
+    toast(`"${z.orig}" will be removed when you press Save changes.`);
+  };
+  $('#btnEdSave').onclick = async () => {
+    if (!ed) return;
+    const tidy = z => z.name.trim().replace(/\s+/g, ' ');
+    if (ed.zones.some(z => !tidy(z))) { toast('Every zone needs a name.'); return; }
+    const names = ed.zones.map(z => tidy(z).toLowerCase());
+    if (new Set(names).size !== names.length) { toast('Two zones have the same name. Give each zone its own name.'); return; }
+    const changes = ed.removed.map(n => ({op: 'delete', zone: n}));        // removals first: a freed name can be reused
+    ed.zones.filter(zoneDirty).forEach(z => {
+      const c = {op: 'update', zone: z.orig};
+      if (tidy(z) !== z.orig) c.name = tidy(z);
+      if (z.role !== z.origRole) c.role = z.role;
+      if (z.geo) c.points = z.points.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]);
+      changes.push(c);
+    });
+    if (!changes.length) { stopEdit(true); return; }
+    const go = async () => {
+      $('#btnEdSave').disabled = true;
+      const r = await sendZoneChanges(changes, go);
+      if (!ed) return;
+      if (!r) { renderEditBar(); return; }
+      reportZoneResult(r, needCe() ? 'Zones saved in Congruence Eye.' : 'Zones saved.');
+      const failed = new Set((r.errors || []).map(x => x.zone));
+      if (!failed.size || r.synced === false) { stopEdit(true); return; }
+      // keep the editor open with only what could not be saved still marked as changed
+      ed.removed = ed.removed.filter(n => failed.has(n));
+      ed.zones.forEach(z => { if (!failed.has(z.orig)) { z.name = tidy(z); z.orig = z.name; z.origRole = z.role; z.geo = false; } });
+      renderEditBar(); drawOverlay();
+    };
+    await go();
+  };
 
   // ------------------------------------------------------------ alerts + events
   function renderOpenAlerts(list, box, withActions) {

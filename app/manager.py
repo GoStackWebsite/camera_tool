@@ -3,6 +3,7 @@ store open/close detection, and the daily report schedule."""
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from .analytics import Analytics
 from .camera import RTSPCamera
 from .config import MODELS_DIR, AppConfig, CameraConfig, ConfigStore, Settings, StaffConfig, Thresholds, mask_url
 from .demographics import Demographics
-from .staffcls import StaffClassifier
+from .staffcls import BrandClassifier, StaffClassifier
 from .detector import PersonTracker
 from .notify import Notifier
 from .pipeline import Pipeline
@@ -85,7 +86,8 @@ class Manager:
         camera = RTSPCamera(cam.url)
         tracker = PersonTracker(self.settings.model, self.settings.device, self.settings.conf, self.settings.imgsz)
         staff_model = StaffClassifier.create(MODELS_DIR)      # learned uniform, when models/staff_cls.pt exists
-        analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model)
+        brand_model = BrandClassifier.create(MODELS_DIR)      # learned brand of the uniform, when models/brand_cls.pt exists
+        analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model, brand_model)
         demographics = Demographics.create(MODELS_DIR) if self.config.demographics.enabled else None
         pipeline = Pipeline(camera, tracker, analytics, self.settings, cam.target_fps, demographics, self.config_store)
         rt = CameraRuntime(cam, camera, tracker, analytics, pipeline, time.time())
@@ -115,18 +117,40 @@ class Manager:
         if cam.enabled:
             self._start_runtime(cam)
 
-    def update_camera(self, cam: CameraConfig) -> None:
+    @staticmethod
+    def _zone_renames(old: CameraConfig, new: CameraConfig, explicit: dict | None) -> dict:
+        """{old name: new name} for zones that kept their identity (same Congruence Eye id, or renamed in the
+        camera view) and only changed their name."""
+        found: dict = {}
+        by_rid = {z.remote_id: z.name for z in old.zones if z.remote_id}
+        for z in new.zones:
+            o = by_rid.get(z.remote_id) if z.remote_id else None
+            if o and o != z.name:
+                found[o] = z.name
+        found.update(explicit or {})
+        old_names = {z.name for z in old.zones}
+        new_names = {z.name for z in new.zones}
+        return {o: n for o, n in found.items()
+                if o in old_names and n in new_names and o not in new_names and n not in old_names}
+
+    def update_camera(self, cam: CameraConfig, renames: dict | None = None) -> None:
         with self.config_store.lock:
             old = self.config.camera(cam.id)
             if old is None:
                 raise KeyError(cam.id)
             self.config.cameras[self.config.cameras.index(old)] = cam
             self.config_store.save()
+        renames = self._zone_renames(old, cam, renames)
+        for o, n in renames.items():                  # a renamed zone keeps its history
+            try:
+                self.store.rename_zone(cam.id, o, n)
+            except Exception:
+                log.exception("could not move the history of zone '%s' to '%s'", o, n)
         rt = self.runtimes.get(cam.id)
         needs_restart = (old.url != cam.url or old.enabled != cam.enabled or old.target_fps != cam.target_fps)
         if rt and not needs_restart:
             rt.cfg = cam
-            rt.analytics.apply_camera_config(cam)
+            rt.analytics.apply_camera_config(cam, renames)
             return
         if rt:
             self._stop_runtime(cam.id)
@@ -210,6 +234,7 @@ class Manager:
             "notifier": {"sent": self.notifier.sent, "last_error": self.notifier.last_error},
             "congruence": self.connector.status() if self.connector else None,
             "staff_model": next((rt.analytics.staff_model.info() for rt in runtimes if rt.analytics.staff_model), {"loaded": False}),
+            "brand_model": next((rt.analytics.brand_model.info() for rt in runtimes if rt.analytics.brand_model), {"loaded": False}),
             "demographics": {"enabled": self.config.demographics.enabled,
                              "available": any(rt.pipeline.demographics is not None for rt in runtimes),
                              "faces_seen": sum(rt.pipeline.demographics.faces_seen for rt in runtimes if rt.pipeline.demographics)},
@@ -220,11 +245,34 @@ class Manager:
         while not self._stop.is_set():
             try:
                 self._tick_health()
+                self._tick_staff_model()
                 self._tick_store_day()
                 self._tick_report()
             except Exception:
                 log.exception("health loop error")
             self._stop.wait(5.0)
+
+    def _tick_staff_model(self) -> None:
+        """Load models/staff_cls.pt when it appears or changes (after tools/staff_train.py), without a restart.
+        Every camera gets its own instance: the predictor is not thread-safe."""
+        path = MODELS_DIR / "staff_cls.pt"
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        if time.time() - mtime < 10:                 # still being written by the trainer
+            return
+        with self.lock:
+            runtimes = list(self.runtimes.values())
+        for rt in runtimes:
+            cur = rt.analytics.staff_model
+            if cur is not None and cur.mtime == mtime:
+                continue
+            new = StaffClassifier.create(MODELS_DIR)
+            if new is None:
+                return
+            rt.analytics.set_staff_model(new)
+            log.info("camera %s: staff model %s", rt.cfg.id, "reloaded (file changed)" if cur is not None else "loaded")
 
     def _tick_health(self) -> None:
         now = time.time()

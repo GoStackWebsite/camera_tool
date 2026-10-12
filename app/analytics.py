@@ -55,9 +55,14 @@ def hue_distance(a: float, b: float) -> float:
 
 
 BRAND_MIN_PX = 40            # logo pixels of one brand colour on the chest (summed over samples) before the brand is known
-MODEL_MIN_SAMPLES = 6        # learned classifier: samples (0.5 s apart) before a person can become staff
-MODEL_STAFF_PROB = 0.70      # mean P(staff) at or above this -> staff
-MODEL_CUSTOMER_PROB = 0.25   # a "uniform" staff whose mean drops to this (10+ samples) becomes a customer again
+BRAND_MIN_VOTES = 2.5        # learned brand model: summed probability (~3 confident samples) before the brand is named
+MODEL_MIN_SAMPLES = 10       # learned classifier: samples (0.5 s apart) before it decides anything about a person;
+                             # 3 s was too quick: a customer standing beside a staff member for a moment flipped
+MODEL_STAFF_PROB = 0.80      # mean P(staff) over the last 20 samples at or above this -> staff
+MODEL_CUSTOMER_PROB = 0.40   # a "uniform" staff whose mean drops to this becomes a customer again (was 0.25: sticky)
+MODEL_ZONE_PATIENCE = 30     # a staff zone promotes someone the model clearly sees out of uniform only after 30x the
+                             # usual time (20 s -> 10 min): customers leaning on a counter have their feet hidden and
+                             # their box ends on the counter top, inside a staff zone drawn over it
 
 
 def logo_mask(hsv: np.ndarray, hues: list, tol: int = 4) -> np.ndarray:
@@ -138,6 +143,7 @@ class Track:
     pb_n: int = 0
     pb_counted: bool = False                        # a track is one passer-by however often it wanders over the line
     brand_px: dict = field(default_factory=dict)    # staff: logo pixels seen per brand colour
+    brand_votes: dict = field(default_factory=dict) # staff: learned brand model, summed probability per brand
     brand: str | None = None                        # staff: brand of the uniform (from the logo colour)
     served: dict = field(default_factory=dict)      # customer: seconds attended per staff brand (resolved at visit end)
     served_by: dict = field(default_factory=dict)   # customer: seconds attended per staff track id
@@ -188,11 +194,12 @@ def _fresh_minute(bucket: int) -> dict:
 
 class Analytics:
     def __init__(self, cam: CameraConfig, thr: Thresholds, store: Store | None, alerts: AlertManager | None,
-                 staff_cfg: StaffConfig | None = None, staff_model=None):
+                 staff_cfg: StaffConfig | None = None, staff_model=None, brand_model=None):
         self.cam = cam
         self.thr = thr
         self.staff_cfg = staff_cfg or StaffConfig()
         self.staff_model = staff_model            # app.staffcls.StaffClassifier (learned uniform), optional
+        self.brand_model = brand_model            # app.staffcls.BrandClassifier (which brand's uniform), optional
         self.store = store
         self.alerts = alerts
         self._lock = threading.RLock()
@@ -235,8 +242,21 @@ class Analytics:
                 t.loitering = False
                 t.run_alerted = False
 
-    def apply_camera_config(self, cam: CameraConfig) -> None:
+    def apply_camera_config(self, cam: CameraConfig, renames: dict | None = None) -> None:
+        """renames: {old zone name: new zone name} for zones that only changed their name, so people standing
+        in them keep their visit and the live counters carry over."""
         with self._lock:
+            for old, new in (renames or {}).items():
+                for t in self.tracks.values():
+                    if old in t.zones:
+                        t.zones[new] = t.zones.pop(old)
+                    if old in t.zone_seq:
+                        t.zone_seq = [new if n == old else n for n in t.zone_seq]
+                if old in self.zone_stats:
+                    self.zone_stats[new] = self.zone_stats.pop(old)
+                queues = self._minute.get("queues") or {}
+                if old in queues:
+                    queues[new] = queues.pop(old)
             self.cam = cam
             self.cfg_rev += 1
             names = {z.name for z in cam.zones}
@@ -698,8 +718,22 @@ class Analytics:
                 self._leave_zone(t, z.name, now)
             if inside and z.role == "staff" and not t.is_staff and t.manual_staff is None:
                 t.staff_zone_time += dt
-                if t.staff_zone_time >= self.thr.staff_zone_seconds:
+                need = self.thr.staff_zone_seconds * (MODEL_ZONE_PATIENCE if self._clearly_not_uniform(t) else 1)
+                if t.staff_zone_time >= need:
                     self._set_staff(t, now, "staff zone", z.name)
+
+    def _clearly_not_uniform(self, t: Track) -> bool:
+        """The learned model has seen enough of this person and their clothing is not the uniform."""
+        n = len(t.model_votes)
+        return self.staff_model is not None and n >= MODEL_MIN_SAMPLES and sum(t.model_votes) / n <= MODEL_CUSTOMER_PROB
+
+    def set_staff_model(self, model) -> None:
+        """Swap in a newly trained uniform model (models/staff_cls.pt changed on disk). Votes from the old model
+        are dropped; people it marked as staff are judged again by the new one within a few seconds."""
+        with self._lock:
+            self.staff_model = model
+            for t in self.tracks.values():
+                t.model_votes.clear()
 
     def _set_staff(self, t: Track, now: float, reason: str, zone: str | None = None) -> None:
         t.is_staff = True
@@ -738,7 +772,17 @@ class Analytics:
         plain = hsv[~marks] if 0 < np.count_nonzero(marks) <= 0.25 * len(hsv) else hsv
         mixed = float(plain[:, 2].std()) > 55        # desk + laptop + paper, not a single garment
         t.torso_anchored = anchored and not mixed
-        if self.staff_cfg.brands:
+        if self.brand_model is not None:
+            if t.is_staff:                          # the learned model names the brand; it sees print, logo and cut
+                res = self.brand_model.brand(frame, t.bbox)
+                if res is not None:
+                    name, prob = res
+                    t.brand_votes[name] = t.brand_votes.get(name, 0.0) + prob
+                    total = sum(t.brand_votes.values())
+                    best = max(t.brand_votes, key=t.brand_votes.get)
+                    if total >= BRAND_MIN_VOTES and t.brand_votes[best] / total >= 0.6:
+                        t.brand = best
+        elif self.staff_cfg.brands:
             self._vote_brand(t, frame, anchored)
         if t.manual_staff is not None or t.staff_reason not in ("", "uniform"):
             return
@@ -752,7 +796,7 @@ class Analytics:
                 mean = sum(t.model_votes) / n
                 if not t.is_staff and n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB:
                     self._set_staff(t, now, "uniform")
-                elif t.is_staff and t.staff_reason == "uniform" and n >= 10 and mean <= MODEL_CUSTOMER_PROB:
+                elif t.is_staff and t.staff_reason == "uniform" and n >= MODEL_MIN_SAMPLES and mean <= MODEL_CUSTOMER_PROB:
                     t.is_staff = False
                     t.staff_reason = ""
                     self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff, counted as customer")

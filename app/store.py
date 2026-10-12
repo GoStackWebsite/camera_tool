@@ -193,6 +193,17 @@ class Store:
                 self.conn.execute(f"DELETE FROM {table} WHERE camera_id=?", (old,))
             self.conn.commit()
 
+    def rename_zone(self, camera_id: str, old: str, new: str) -> None:
+        """A zone was renamed: its history (visits, queue minutes, events, alerts) follows the new name."""
+        if old == new:
+            return
+        with self.lock:
+            for table in ("events", "zone_visits", "alerts"):
+                self.conn.execute(f"UPDATE {table} SET zone=? WHERE camera_id=? AND zone=?", (new, camera_id, old))
+            self.conn.execute("UPDATE OR IGNORE queue_minutes SET zone=? WHERE camera_id=? AND zone=?", (new, camera_id, old))
+            self.conn.execute("DELETE FROM queue_minutes WHERE camera_id=? AND zone=?", (camera_id, old))
+            self.conn.commit()
+
     def set_sales(self, date: str, bills: int, revenue: float) -> None:
         self._exec("INSERT OR REPLACE INTO sales(date, bills, revenue) VALUES (?,?,?)", (date, bills, revenue))
 

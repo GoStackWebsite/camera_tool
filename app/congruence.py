@@ -188,6 +188,8 @@ class CongruenceConnector:
         self.last_ok = 0.0
         self.sent = {k: 0 for k in KINDS} | {"snapshot": 0, "heartbeat": 0}
         self.rejected = {k: 0 for k in KINDS}       # rows the server accepted the batch for but dropped (stale ts, unknown zone...)
+        self.duplicates = {k: 0 for k in KINDS}     # rows the server reported as already known
+        self.replayed = {k: 0 for k in KINDS}       # whole batches the server answered from its cache (batch id reuse)
         self.last_reject = ""
 
     # ---- lifecycle --------------------------------------------------------
@@ -391,7 +393,7 @@ class CongruenceConnector:
         return {
             "enabled": c.enabled, "configured": self.configured(), "base_url": c.base_url,
             "online": self.online, "last_error": self.last_error, "last_ok": self.last_ok,
-            "backlog": backlog, "dead": dead, "sent": dict(self.sent), "rejected": dict(self.rejected), "last_reject": self.last_reject,
+            "backlog": backlog, "dead": dead, "sent": dict(self.sent), "rejected": dict(self.rejected), "duplicates": dict(self.duplicates), "replayed_batches": dict(self.replayed), "last_reject": self.last_reject,
             "store": st.get("name"), "mapped_cameras": sum(1 for v in c.cameras.values() if v),
             "mapped_zones": sum(1 for v in c.zones.values() if v),
             "managed": bool(c.managed), "remote_fetched_at": self.remote_fetched_at, "remote_cached_at": self.remote_cached_at,
@@ -579,7 +581,15 @@ class CongruenceConnector:
             j = resp.json()
         except ValueError:
             return
-        n = int(j.get("rejected") or 0) if isinstance(j, dict) else 0
+        if not isinstance(j, dict):
+            return
+        if j.get("duplicate") is True:            # the whole batch was a replay for the server: nothing was stored
+            self.replayed[kind] = self.replayed.get(kind, 0) + 1
+            log.warning("Congruence Eye treated a %s batch as a replay (batch id seen before): rows not stored", kind)
+        dup = int(j.get("duplicates") or 0)
+        if dup:                                   # the server already had these rows (same camera, track, type, ts)
+            self.duplicates[kind] = self.duplicates.get(kind, 0) + dup
+        n = int(j.get("rejected") or 0)
         if n:
             self.rejected[kind] = self.rejected.get(kind, 0) + n
             first = (j.get("errors") or [None])[0]
@@ -604,7 +614,10 @@ class CongruenceConnector:
                     for _, p in rows:
                         p.pop("_jpeg_b64", None)
                 body = rows[0][1] if key is None else {key: [p for _, p in rows]}
-                batch_id = hashlib.sha1(f"{kind}:{self.session_id}:{','.join(map(str, ids))}".encode()).hexdigest()
+                # The server keeps one result per batch id (exactly-once). The id must therefore be unique per
+                # CONTENT, not per spool row number: row numbers are reused once the spool drains, and a reused
+                # id makes the server replay the old answer and silently drop the new rows.
+                batch_id = hashlib.sha1(f"{kind}:{self.session_id}:".encode() + json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
                 resp = self._post(path, body, batch_id)
                 if resp is None:                     # network: resend exactly this batch later
                     self._pending[kind] = ids
@@ -613,6 +626,11 @@ class CongruenceConnector:
                     self.spool.delete(ids)
                     self.sent[kind] += len(ids)
                     self._count_rejections(kind, resp)
+                    if kind == "events":            # audit trail: what left and what the server said it kept
+                        types = {}
+                        for _, p in rows:
+                            types[p.get("type")] = types.get(p.get("type"), 0) + 1
+                        log.info("Congruence Eye events batch: sent %s -> %s", types, resp.text[:160])
                     continue
                 if resp.status_code in DEAD_STATUS or (resp.status_code == 403 and PERMANENT_403 in resp.text):
                     log.warning("Congruence Eye rejected %d %s row(s): HTTP %s %s", len(ids), kind, resp.status_code, resp.text[:200])
