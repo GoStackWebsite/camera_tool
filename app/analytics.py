@@ -58,11 +58,16 @@ BRAND_MIN_PX = 40            # logo pixels of one brand colour on the chest (sum
 BRAND_MIN_VOTES = 2.5        # learned brand model: summed probability (~3 confident samples) before the brand is named
 CROP_MAX_OVERLAP = 0.25      # another person's box may cover at most this share of the upper-body crop for a classifier vote
 CLIPPED_MIN_HEIGHT = 0.35    # a box cut by the frame bottom and shorter than this (fraction of the frame) is not classified
+CLIPPED_EDGE = 0.015         # "cut by the frame bottom": the box ends within this fraction of the frame height of it
+                             # (the detector stops a few pixels short of the edge; 2 px was never reached at 1440p)
+ZONE_EDGE = 0.002            # foot points are pulled this far inside the frame before a zone test, so a zone drawn to
+                             # the frame edge contains the people standing on that edge
+STAFF_GHOST_SECONDS = 120.0  # someone lost inside a staff zone and someone appearing at the same spot within this
+STAFF_GHOST_DISTANCE = 0.06  # time and distance are one person (a seated cashier of whom only the head shows flickers)
 UPPER_BODY_FRACTION = 0.62   # the classifier's crop: head to hips (app/staffcls.py CROP_BOTTOM)
 MODEL_RECENT_N = 6           # promotion needs the last N samples (3 s) all at least MODEL_RECENT_MIN: no early-noise promotions
 MODEL_RECENT_MIN = 0.5
 MODEL_RECENT_DEMOTE = 0.5    # a "uniform" staff whose last N samples average this or less is a customer again (fast correction)
-MODEL_SECOND_OPINION_MAX_CUSTOMER = 0.5   # the brand model may call the person "customer" at most this much
 MODEL_MIN_SAMPLES = 10       # learned classifier: samples (0.5 s apart) before it decides anything about a person;
                              # 3 s was too quick: a customer standing beside a staff member for a moment flipped
 MODEL_STAFF_PROB = 0.80      # mean P(staff) over the last 20 samples at or above this -> staff
@@ -215,6 +220,7 @@ class Analytics:
         self.thr = thr
         self.staff_cfg = staff_cfg or StaffConfig()
         self.staff_model = staff_model            # app.staffcls.StaffClassifier (learned uniform), optional
+        self._staff_ghosts: list = []             # (lost_at, fx, fy, banked seconds, is_staff, reason, brand) of tracks lost in a staff zone
         self.brand_model = brand_model            # app.staffcls.BrandClassifier (which brand's uniform), optional
         self.store = store
         self.alerts = alerts
@@ -545,7 +551,7 @@ class Analytics:
         x1, y1, x2, y2 = t.bbox
         h = frame.shape[0]
         bh = y2 - y1
-        if y2 >= h - 2 and bh < CLIPPED_MIN_HEIGHT * h:
+        if y2 >= h * (1.0 - CLIPPED_EDGE) and bh < CLIPPED_MIN_HEIGHT * h:
             return False
         cy2 = y1 + bh * UPPER_BODY_FRACTION
         area = max(1.0, float((x2 - x1) * (cy2 - y1)))
@@ -558,13 +564,6 @@ class Analytics:
             if ix > 0 and iy > 0 and (ix * iy) / area > CROP_MAX_OVERLAP:
                 return False
         return True
-
-    def _second_opinion_is_staff(self, t: Track, frame: np.ndarray) -> bool:
-        """Before promoting to staff, ask the brand model (trained separately) whether this is a customer."""
-        if self.brand_model is None:
-            return True
-        p = self.brand_model.customer_prob(frame, t.bbox)
-        return p is None or p <= MODEL_SECOND_OPINION_MAX_CUSTOMER
 
     def _vote_brand(self, t: Track, frame: np.ndarray, anchored: bool) -> None:
         """Count logo-coloured pixels on the chest for each configured brand; the dominant colour names the brand."""
@@ -751,8 +750,9 @@ class Analytics:
 
     def _update_zones(self, t: Track, now: float, fx: float, fy: float, dt: float) -> None:
         staff_zone = None
+        zx, zy = min(max(fx, ZONE_EDGE), 1.0 - ZONE_EDGE), min(max(fy, ZONE_EDGE), 1.0 - ZONE_EDGE)
         for z in self.cam.zones:
-            inside = point_in_polygon(fx, fy, z.points)
+            inside = point_in_polygon(zx, zy, z.points)
             if inside and z.name not in t.zones:
                 t.zones[z.name] = now
                 if not t.zone_seq or t.zone_seq[-1] != z.name:
@@ -765,7 +765,32 @@ class Analytics:
                 self._leave_zone(t, z.name, now)
             if inside and z.role == "staff":
                 staff_zone = z.name
+        if staff_zone is not None and len(t.history) == 1:
+            self._inherit_staff_ghost(t, now, fx, fy)
         self._update_staff_zone(t, now, dt, staff_zone)
+
+    def _inherit_staff_ghost(self, t: Track, now: float, fx: float, fy: float) -> None:
+        """A new track that starts inside a staff zone, where a track was lost moments ago, is that person again:
+        it keeps the banked zone time and the staff status instead of starting as a customer."""
+        self._staff_ghosts = [g for g in self._staff_ghosts if now - g[0] <= STAFF_GHOST_SECONDS]
+        best = min(self._staff_ghosts, key=lambda g: math.hypot(g[1] - fx, g[2] - fy), default=None)
+        if best is None or math.hypot(best[1] - fx, best[2] - fy) > STAFF_GHOST_DISTANCE:
+            return
+        self._staff_ghosts.remove(best)
+        _, _, _, bank, was_staff, reason, brand = best
+        t.staff_zone_time = bank
+        if was_staff and t.manual_staff is None:
+            t.is_staff = True
+            t.staff_reason = reason
+            t.brand = brand
+
+    def _leave_staff_ghost(self, t: Track) -> None:
+        """Remember a track that was lost while inside a staff zone (see _inherit_staff_ghost)."""
+        if t.staff_zone_out == 0.0 and t.staff_zone_time > 0.0 and t.manual_staff is None:
+            fx, fy = t.foot
+            self._staff_ghosts.append((t.last_seen, fx, fy, t.staff_zone_time, t.is_staff and t.staff_reason in ("staff zone", "uniform"),
+                                       t.staff_reason, t.brand))
+            del self._staff_ghosts[:-20]
 
     def _update_staff_zone(self, t: Track, now: float, dt: float, zone: str | None) -> None:
         """A staff zone says where someone stands, not who they are. So the presence has to be sustained (time
@@ -851,11 +876,12 @@ class Analytics:
         t.torso_anchored = anchored and not mixed
         if not self._crop_is_clean(t, frame):
             return                                  # contaminated or unreadable crop: no classifier vote this sample
+        second = None                               # brand model: (P(customer), best brand, its probability)
         if self.brand_model is not None:
+            second = self.brand_model.read(frame, t.bbox)
             if t.is_staff:                          # the learned model names the brand; it sees print, logo and cut
-                res = self.brand_model.brand(frame, t.bbox)
-                if res is not None:
-                    name, prob = res
+                if second is not None:
+                    _, name, prob = second
                     t.brand_votes[name] = t.brand_votes.get(name, 0.0) + prob
                     total = sum(t.brand_votes.values())
                     best = max(t.brand_votes, key=t.brand_votes.get)
@@ -870,6 +896,10 @@ class Analytics:
             # only used when no model is installed
             prob = self.staff_model.staff_prob(frame, t.bbox)
             if prob is not None:
+                if second is not None:
+                    # the verdict on clothing is the average of two separately trained models: either one alone
+                    # calls some dark-clothed customers staff, but rarely the same ones (validation: 0 of 164)
+                    prob = (prob + 1.0 - second[0]) / 2
                 t.model_votes.append(prob)
                 n = len(t.model_votes)
                 mean = sum(t.model_votes) / n
@@ -881,9 +911,9 @@ class Analytics:
                 else:
                     strong = (n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB
                               and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN)
-                if (not t.is_staff or by_zone) and strong and self._second_opinion_is_staff(t, frame):
-                    # a stable run of confident samples, not a few early ones while the person was half visible,
-                    # and the independently trained brand model must not call the person a customer
+                if (not t.is_staff or by_zone) and strong:
+                    # a stable run of confident samples (both models agreeing), not a few early ones while the
+                    # person was half visible
                     if by_zone:
                         t.staff_reason = "uniform"      # position and clothing agree: stays staff outside the zone
                     else:
@@ -1008,6 +1038,13 @@ class Analytics:
 
     def _close_track(self, t: Track, now: float) -> None:
         dwell = t.last_seen - t.first_seen
+        self._leave_staff_ghost(t)
+        if (not t.is_staff and t.manual_staff is None and t.staff_zone_out == 0.0 and t.staff_zone_time >= 0.6 * max(dwell, 1.0)
+                and not self._clearly_not_uniform(t)):
+            # lost inside a staff zone after spending (nearly) all of its time there, and nothing says "customer":
+            # a fragment of someone behind the counter, not a customer visit
+            t.is_staff = True
+            t.staff_reason = "staff zone"
         if not t.is_staff:
             self.completed_dwells.append(dwell)
         for zname in list(t.zones):

@@ -1,7 +1,8 @@
 """Rule tests for staff detection (no camera, no trained model needed): python tools/test_staff_rules.py
 
-A fake uniform model returns the probability the scenario dictates, so the tests exercise the decision rules of
-app/analytics.py alone: staff zones as sustained, lapsing evidence, and the uniform model's flip-flop damping."""
+Fake models return the probabilities the scenario dictates, so the tests exercise the decision rules of
+app/analytics.py alone: staff zones as sustained, lapsing evidence, the uniform model's flip-flop damping, the
+two-model verdict on clothing, and people who are lost and found again inside a staff zone."""
 from __future__ import annotations
 
 import sys
@@ -35,28 +36,47 @@ class FakeModel:
         return {"loaded": True}
 
 
-def make(with_model: bool = True):
-    cam = CameraConfig(id="t", name="test", url="", zones=[ZoneConfig("Counter staff side", STAFF_ZONE, "staff")])
+class FakeBrand:
+    """Stands in for staffcls.BrandClassifier: one P(customer) for everybody."""
+
+    def __init__(self, p_customer: float):
+        self.p_customer = p_customer
+
+    def read(self, frame, bbox):
+        return self.p_customer, "gogizmo", 1.0 - self.p_customer
+
+    def info(self):
+        return {"loaded": True}
+
+
+def make(with_model: bool = True, brand: FakeBrand | None = None, zone: list | None = None):
+    cam = CameraConfig(id="t", name="test", url="", zones=[ZoneConfig("Counter staff side", zone or STAFF_ZONE, "staff")])
     model = FakeModel() if with_model else None
-    return A.Analytics(cam, Thresholds(), None, None, StaffConfig(), model, None), model
+    return A.Analytics(cam, Thresholds(), None, None, StaffConfig(), model, brand), model
 
 
-def det(track_id: int, foot: tuple[float, float]) -> Detection:
+def det(track_id: int, foot: tuple[float, float], height: int = 300) -> Detection:
     cx, y2 = int(foot[0] * W), int(foot[1] * H)
-    return Detection(track_id, PERSON_CLASS, cx - 40, y2 - 300, cx + 40, y2, 0.9)
+    return Detection(track_id, PERSON_CLASS, cx - 40, y2 - height, cx + 40, y2, 0.9)
 
 
-def run(an, model, track_id: int, foot, seconds: float, prob: float | None, t0: float, step: float = 0.25) -> float:
+def run(an, model, track_id: int, foot, seconds: float, prob: float | None, t0: float, step: float = 0.25, height: int = 300) -> float:
     """Keep one person at `foot` for `seconds`; the fake model answers `prob` for them. Returns the end time."""
     t = t0
     end = t0 + seconds
     while t < end:
-        d = det(track_id, foot)
+        d = det(track_id, foot, height)
         if model is not None:
             model.by_x[d.x1] = prob
         an.update([d], W, H, t, None, FRAME)
         t += step
     return t
+
+
+def lose(an, t: float, seconds: float = 4.0) -> float:
+    """Nobody in view for a while: every track is lost and closed."""
+    an.update([], W, H, t + seconds, None, FRAME)
+    return t + seconds + 0.25
 
 
 CHECKS: list[tuple[str, bool, str]] = []
@@ -136,6 +156,41 @@ def main() -> int:
     t = run(an, m, 7, ON_FLOOR, 8, 0.10, t)
     t = run(an, m, 7, ON_FLOOR, 30, 0.99, t)
     check("... and after two demotions clothing alone no longer makes them staff", not an.tracks[7].is_staff and an.tracks[7].model_demotions == 2, state(an, 7))
+
+    # 8. clothing verdict = both models: the staff model alone is sure, the brand model says "customer"
+    an, m = make(brand=FakeBrand(0.65))
+    t = run(an, m, 8, ON_FLOOR, 40, 0.98, 1000.0)
+    check("black T-shirt customer: staff model says staff, brand model says customer -> stays a customer", not an.tracks[8].is_staff, state(an, 8))
+    an, m = make(brand=FakeBrand(0.02))
+    t = run(an, m, 8, ON_FLOOR, 12, 0.98, 1000.0)
+    check("... both models agree on the uniform -> staff", an.tracks[8].is_staff and an.tracks[8].staff_reason == "uniform", state(an, 8))
+
+    # 9. seated cashier of whom only the head shows: the tracker loses and re-finds her every few seconds
+    an, m = make()
+    t = run(an, m, 20, IN_ZONE, zs + 5, None, 1000.0)
+    t = lose(an, t)
+    t = run(an, m, 21, IN_ZONE, 0.5, None, t)
+    check("lost and found again at the same spot in a staff zone: still staff, not a new visitor", an.tracks[21].is_staff, state(an, 21))
+    t = run(an, m, 22, (IN_ZONE[0] + 0.12, IN_ZONE[1]), 0.5, None, t)
+    check("... someone appearing elsewhere in the zone starts from zero", not an.tracks[22].is_staff, state(an, 22))
+    an, m = make()
+    t = 1000.0
+    for i in range(4):                                   # four 8-second fragments of the same seated person
+        t = run(an, m, 30 + i, IN_ZONE, 8, None, t)
+        last = an.tracks[30 + i]
+        t = lose(an, t)
+    check("short fragments at one spot add up to the staff-zone time", last.is_staff, f"staff={last.is_staff} bank={last.staff_zone_time:.0f}s")
+
+    # 10. a zone drawn to the frame edge contains the people whose box ends on that edge
+    an, m = make(zone=[[0.70, 0.60], [1.0, 0.60], [1.0, 1.0], [0.70, 1.0]])
+    t = run(an, m, 40, (0.85, 1.0), zs + 5, None, 1000.0)
+    check("zone drawn to the bottom edge counts a person whose box ends at the edge", an.tracks[40].is_staff, state(an, 40))
+
+    # 11. a short box cut off by the frame bottom shows hair, not clothing: no vote, so the zone is not held back
+    an, m = make(zone=[[0.70, 0.60], [1.0, 0.60], [1.0, 1.0], [0.70, 1.0]])
+    t = run(an, m, 41, (0.85, 0.993), zs + 5, 0.0, 1000.0, height=150)
+    check("head-only crop at the frame bottom gives no 'customer' votes and the staff zone decides", an.tracks[41].is_staff and not an.tracks[41].model_votes,
+          state(an, 41) + f" votes={len(an.tracks[41].model_votes)}")
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")

@@ -136,6 +136,22 @@ class BrandClassifier:
             log.debug("brand classifier failed: %s", e)
             return None
 
+    def read(self, frame: np.ndarray, bbox: tuple) -> tuple[float, str, float] | None:
+        """One pass for everything the engine asks of this model: (P(customer), best brand, its probability)."""
+        crop = upper_body(frame, bbox)
+        if crop is None:
+            return None
+        try:
+            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            probs = r.probs.data.float().cpu().tolist()
+            self.samples += 1
+            ci = next((i for i, n in self.names.items() if n.lower() == "customer"), None)
+            best = max((i for i, n in self.names.items() if n.lower() != "customer"), key=lambda i: probs[i])
+            return (float(probs[ci]) if ci is not None else 0.0), self.names[best], float(probs[best])
+        except Exception as e:
+            log.debug("brand classifier failed: %s", e)
+            return None
+
     def customer_prob(self, frame: np.ndarray, bbox: tuple) -> float | None:
         """P(customer) from the brand model: a second, independently trained opinion on whether this is staff at all."""
         crop = upper_body(frame, bbox)
