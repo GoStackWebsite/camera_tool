@@ -309,6 +309,17 @@ def main() -> int:
     check("in a staff zone, no clothing visible: 'identifying' until the zone decides, then staff", mid == (0, 1, False) and an.tracks[80].is_staff,
           f"after 10 s (customers, identifying, staff)={mid}, then " + state(an, 80))
 
+    # 16. the count line runs through the staff area: someone seated there is not coming and going through the door
+    an, m = make(line=DOOR_LINE, zone=[[0.70, 0.60], [1.0, 0.60], [1.0, 1.0], [0.70, 1.0]])
+    t = 1000.0
+    for i in range(60):                                  # a minute on a stool whose foot point wobbles over the line
+        t = run(an, m, 90, (0.85, 0.86 if i % 2 else 0.94), 1.0, 0.97, t, step=0.1)
+    sent = [e[0] for e in an.emitter.sent if e[0] in ("ENTRY", "EXIT")]
+    check("seated in a staff zone on the count line: no entries or exits are counted", an.entries == an.exits == an.staff_entries == an.staff_exits == 0 and not sent,
+          f"in={an.entries} out={an.exits} staff in={an.staff_entries} staff out={an.staff_exits} sent={len(sent)}")
+    t, crossed = walk_in(an, m, 91, 0.03, t)
+    check("... while a customer walking in beside it is still counted", an.entries == 1, f"entries={an.entries}")
+
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
     return 1 if failed else 0

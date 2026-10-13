@@ -764,6 +764,10 @@ class Analytics:
         qx, qy = px + ta * (fx - px), py + ta * (fy - py)
         u = ((qx - ax) * dx + (qy - ay) * dy) / ((dx * dx + dy * dy) or 1e-12)
         within = -0.1 <= u <= 1.1                    # inside the drawn segment (with a little slack)
+        if within and self._in_staff_zone(qx, qy, fx, fy):
+            within = False                           # the line runs through a staff area there: someone on a stool behind
+                                                     # the counter is not walking through the door (their foot point jitters
+                                                     # over the line and used to count in and out all day)
         if within and now - t.last_cross_ts >= self.thr.line_cooldown_seconds:
             if s > 0:
                 if t.pending_entry is not None:
@@ -788,6 +792,12 @@ class Analytics:
         t.side = s
         t.side_pt = (fx, fy)
         t.pending_side = t.pending_n = 0
+
+    def _in_staff_zone(self, qx: float, qy: float, fx: float, fy: float) -> bool:
+        """Is the crossing point, or the person's foot point, inside a staff zone?"""
+        e = ZONE_EDGE
+        pts = [(min(max(x, e), 1.0 - e), min(max(y, e), 1.0 - e)) for x, y in ((qx, qy), (fx, fy))]
+        return any(z.role == "staff" and any(point_in_polygon(x, y, z.points) for x, y in pts) for z in self.cam.zones)
 
     def _settle_entry(self, t: Track, now: float) -> None:
         """Book a held IN crossing as soon as it is known who came in: staff, a customer, or nobody could tell in
