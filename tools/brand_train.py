@@ -77,7 +77,7 @@ def evaluate(path: Path = MODEL) -> dict:
     conf = {a: {b: 0 for b in labels} for a in labels}
     for label in labels:
         for p in sorted((DATA / "val" / label).glob("*.jpg")):
-            r = model.predict(str(p), imgsz=128, verbose=False)[0]
+            r = model.predict(str(p), imgsz=int(model.overrides.get("imgsz") or 128), verbose=False)[0]
             conf[label][names[int(r.probs.top1)]] += 1
     print("confusion (rows = truth, columns = predicted):", labels)
     for a in labels:
@@ -102,6 +102,7 @@ if __name__ == "__main__":
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--eval", action="store_true")
     ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--imgsz", type=int, default=128)
     ap.add_argument("--out", metavar="FILE", help="train: write the model here instead of models/brand_cls.pt")
     ap.add_argument("--model", metavar="FILE", help="eval: the model to evaluate (default models/brand_cls.pt)")
     a = ap.parse_args()
@@ -111,6 +112,6 @@ if __name__ == "__main__":
             sets.append((Path(a.labels2), Path(a.frames2 or a.frames or ".")))
         build(sets)
     if a.train:
-        train(a.epochs, out=Path(a.out) if a.out else MODEL)
+        train(a.epochs, a.imgsz, Path(a.out) if a.out else MODEL)
     if a.eval and not a.train:
         evaluate(Path(a.model) if a.model else MODEL)

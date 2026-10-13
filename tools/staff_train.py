@@ -98,7 +98,7 @@ def evaluate(path: Path = MODEL) -> dict:
             continue
         ok = 0
         for p in imgs:
-            r = model.predict(str(p), imgsz=128, verbose=False)[0]
+            r = model.predict(str(p), imgsz=int(model.overrides.get("imgsz") or 128), verbose=False)[0]
             pred = names[int(r.probs.top1)]
             ok += pred == label
         stats[label] = {"n": len(imgs), "correct": ok}

@@ -15,8 +15,8 @@ ci = {v: k for k, v in brand.names.items()}["customer"]
 res = defaultdict(list)
 for label in ("staff", "customer"):
     for p in sorted((VAL / label).glob("*.jpg")):
-        ps = float(staff.predict(str(p), imgsz=128, verbose=False)[0].probs.data[si])
-        pb = 1.0 - float(brand.predict(str(p), imgsz=128, verbose=False)[0].probs.data[ci])
+        ps = float(staff.predict(str(p), imgsz=int(staff.overrides.get("imgsz") or 128), verbose=False)[0].probs.data[si])
+        pb = 1.0 - float(brand.predict(str(p), imgsz=int(brand.overrides.get("imgsz") or 128), verbose=False)[0].probs.data[ci])
         res[label].append((p.name[:10], ps, pb, (ps + pb) / 2))
 for label, rows in res.items():
     n = len(rows)
