@@ -337,6 +337,10 @@ class Analytics:
         with self._lock:
             self.thr = thr
             self.cfg_rev += 1
+            if not thr.phone_detection:         # switched off: no "using phone" label may linger on screen
+                for t in self.tracks.values():
+                    t.phone_since, t.phone_alerted, t.phone_box = None, False, None
+                    t.phone_near = t.phone_total = 0.0
 
     def apply_staff(self, cfg: StaffConfig) -> None:
         with self._lock:
@@ -383,7 +387,7 @@ class Analytics:
             self._frame_wh = (width, height)
             ids_now = {d.track_id for d in dets if d.is_person}
             persons = [d for d in dets if d.is_person]
-            phones = [d for d in dets if not d.is_person]
+            phones = [d for d in dets if not d.is_person] if self.thr.phone_detection else []
             for d in persons:
                 fx = ((d.x1 + d.x2) / 2) / width
                 fy = d.y2 / height
@@ -423,7 +427,8 @@ class Analytics:
                 self._heat_add(fx, fy)
                 self.ce_heat[min(17, max(0, int(fy * 18))), min(31, max(0, int(fx * 32)))] += 1
 
-            self._update_phones(phones, now)
+            if self.thr.phone_detection:
+                self._update_phones(phones, now)
             if faces:
                 self._update_faces(faces, now)
 

@@ -1,4 +1,4 @@
-"""YOLO detection of people (tracked with ByteTrack) and hand-held phones."""
+"""YOLO detection of people (tracked with ByteTrack) and, when phone detection is switched on, hand-held phones."""
 from __future__ import annotations
 
 import logging
@@ -41,6 +41,7 @@ class PersonTracker:
         self.imgsz = imgsz
         self.quantize = 16 if device != "cpu" else None  # fp16 on GPU
         self.model_name = model_name
+        self.phones = False        # Thresholds.phone_detection; set by the camera manager
         log.info("Loading %s on %s", model_name, self.device_label)
         self.model = YOLO(model_name)
         self.model.predict(np.zeros((imgsz, imgsz, 3), np.uint8), device=self.device, imgsz=imgsz,
@@ -51,7 +52,7 @@ class PersonTracker:
         results = self.model.track(
             frame,
             persist=True,
-            classes=[PERSON_CLASS, PHONE_CLASS],
+            classes=[PERSON_CLASS, PHONE_CLASS] if self.phones else [PERSON_CLASS],
             conf=self.conf,
             imgsz=self.imgsz,
             device=self.device,

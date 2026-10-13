@@ -27,7 +27,10 @@ Telegram / webhook / e-mail, and a daily Excel report.
   queue length over time, served count, average and maximum wait, breaches and breach minutes per queue
 - Queue breach alert: too many people waiting in a queue zone for too long
 - Unattended customer: a customer waits in a display / checkout zone with no staff nearby
-- Phone usage: a staff member holding a phone for N seconds (uses YOLO phone detection)
+- Phone usage: a staff member holding a phone for N seconds (uses YOLO phone detection). **Off by default**
+  since 2026-10-13: switch on *Settings › Thresholds › Detect phone use* (`thresholds.phone_detection`) where
+  it is wanted. Off means the detector does not look for phones at all: no phone boxes or "Using phone"
+  labels, no `phone` / `phone_demo` events, no phone alerts and no MOBILE_USAGE detections to Congruence Eye
 - Crowd, lingering visitor, camera offline, store not opened by opening time, people present after closing
 - Alert centre with acknowledge / resolve, alert history, camera uptime
 
@@ -332,7 +335,7 @@ means the overview camera's person. `GET /api/stats` lists the live links under 
   brand", `/api/traffic` -> `by_brand`, `served` events, visits.brand. In Congruence Eye create a SECTION zone named
   "Served by <brand>" on each camera: the engine sends the attributed visit there, so zone analytics show walk-ins,
   dwell and gender per brand.
-- **Phone demo vs personal phone**: a staff phone episode with a customer within `attend_distance` for at least
+- **Phone demo vs personal phone** (only with *Detect phone use* switched on): a staff phone episode with a customer within `attend_distance` for at least
   `demo_share` (50 %) of its duration is a product demo: event `phone_demo`, COMPLIED MOBILE_USAGE detection in
   Congruence Eye (evidence snapshot attached), no alert. The rest stays a personal-use breach. Next refinement:
   pose keypoints (head down / phone low = scrolling, phone held out = demo).

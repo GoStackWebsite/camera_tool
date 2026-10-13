@@ -99,6 +99,7 @@ class Manager:
         log.info("Starting camera %s (%s): %s", cam.id, cam.name, mask_url(cam.url))
         camera = RTSPCamera(cam.url)
         tracker = PersonTracker(self.settings.model, self.settings.device, self.settings.conf, self.settings.imgsz)
+        tracker.phones = self.config.thresholds.phone_detection
         staff_model = StaffClassifier.create(MODELS_DIR)      # learned uniform, when models/staff_cls.pt exists
         brand_model = BrandClassifier.create(MODELS_DIR)      # learned brand of the uniform, when models/brand_cls.pt exists
         analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model, brand_model)
@@ -186,6 +187,7 @@ class Manager:
             self.config.thresholds = thr
             self.config_store.save()
         for rt in self.runtimes.values():
+            rt.tracker.phones = thr.phone_detection
             rt.analytics.apply_thresholds(thr)
 
     def apply_staff(self, cfg: StaffConfig) -> None:

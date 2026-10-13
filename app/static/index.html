@@ -270,7 +270,7 @@
         <label>Group window (s)<input name="group_window" type="number" step="0.5"></label><label>Group distance (frame fraction)<input name="group_distance" type="number" step="0.05"></label>
         <label>Queue: people allowed<input name="queue_max" type="number" step="1"></label><label>Queue: breach after (s)<input name="queue_seconds" type="number" step="5"></label>
         <label>Unattended customer after (s)<input name="unattended_seconds" type="number" step="5"></label><label>Staff attending within (frame fraction)<input name="attend_distance" type="number" step="0.05"></label>
-        <label>Phone use alert after (s)<input name="phone_seconds" type="number" step="1"></label><label class="check"><input name="phone_everyone" type="checkbox">Phone alerts for customers too</label>
+        <label class="check"><input name="phone_detection" type="checkbox">Detect phone use (off: no phone boxes, alerts or Mobile usage detections)</label><label>Phone use alert after (s)<input name="phone_seconds" type="number" step="1"></label><label class="check"><input name="phone_everyone" type="checkbox">Phone alerts for customers too</label>
         <label>Classify as staff after (s in staff zone)<input name="staff_zone_seconds" type="number" step="5"></label><label>Lingering after (s)<input name="loiter_seconds" type="number" step="30"></label>
         <label>Count line: dead band (frame fraction)<input name="line_margin" type="number" step="0.005" min="0"></label><label>Count line: confirm after (frames)<input name="line_min_frames" type="number" step="1" min="1"></label><label>Count line: cooldown (s)<input name="line_cooldown_seconds" type="number" step="0.5" min="0"></label>
         <label>Crowd alert at (people)<input name="crowd_threshold" type="number" step="1"></label><label>Walk speed (frame-heights/s)<input name="walk_speed" type="number" step="0.01"></label><label>Run speed (frame-heights/s)<input name="run_speed" type="number" step="0.05"></label>
@@ -395,7 +395,7 @@
     $('#aiText').textContent = inf ? `${inf.model.replace('.pt', '')} on ${inf.device}` : 'no camera running';
     $('#alertPill').textContent = `${s.open_alerts.length} open alert${s.open_alerts.length === 1 ? '' : 's'}`; renderCEPill(s.congruence);
     $('#alertPill').style.color = s.open_alerts.length ? 'var(--serious)' : '';
-    $('#kOcc').textContent = st.occupancy; $('#kOccSub').textContent = `${st.loitering} lingering · ${st.phones} on phone`;
+    $('#kOcc').textContent = st.occupancy; $('#kOccSub').textContent = `${st.loitering} lingering` + (CFG.thresholds.phone_detection ? ` · ${st.phones} on phone` : '');
     $('#kStaff').textContent = st.staff; $('#kAlerts').textContent = s.open_alerts.length;
     $('#kOpen').textContent = st.opened_at ? 'Opened ' + fmtHM(st.opened_at) : 'Nobody seen yet';
     $('#kOpenSub').textContent = st.last_presence ? 'last person ' + fmtHM(st.last_presence) : '';
@@ -984,7 +984,7 @@
     const zones = CFG.cameras.flatMap(c => c.zones.map(z => ({...z, cam: c.name}))); const has = role => zones.some(z => z.role === role); const staffOn = has('staff') || ((CFG.staff && CFG.staff.uniforms) || []).length > 0 || (CFG.staff && CFG.staff.after_minutes > 0);
     [[has('queue'), `Queue breach: > ${thr.queue_max - 1} people in a queue zone for ${thr.queue_seconds}s`, 'draw a zone with role "queue"'],
      [staffOn && (has('display') || has('checkout')), `Unattended customer: ${thr.unattended_seconds}s in a display/checkout zone with no staff nearby`, 'set up staff detection plus display/checkout zones'],
-     [staffOn || thr.phone_everyone, `Phone usage: ${thr.phone_seconds}s holding a phone (${thr.phone_everyone ? 'everyone' : 'staff'})`, 'set up staff detection or enable "phone alerts for customers too"'],
+     [thr.phone_detection && (staffOn || thr.phone_everyone), thr.phone_detection ? `Phone usage: ${thr.phone_seconds}s holding a phone (${thr.phone_everyone ? 'everyone' : 'staff'})` : 'Phone usage: switched off (Settings › Thresholds › Detect phone use)', thr.phone_detection ? 'set up staff detection or enable "phone alerts for customers too"' : ''],
      [staffOn, `Staff detection: ${[S && S.staff_model && S.staff_model.loaded ? 'learned uniform model' : '', has('staff') ? 'staff zone' : '', (CFG.staff.uniforms || []).length ? (S && S.staff_model && S.staff_model.loaded ? 'uniform colour (fallback)' : 'uniform colour') : '', CFG.staff.after_minutes > 0 ? `present > ${CFG.staff.after_minutes} min` : ''].filter(Boolean).join(', ') || 'off'}`, 'draw a staff zone, learn a uniform, or set the long-presence minutes'],
      [true, `Crowd: ≥ ${thr.crowd_threshold} customers on one camera`, ''], [true, `Lingering: a visitor present ≥ ${fmtDur(thr.loiter_seconds)}`, ''],
      [true, 'Camera offline > 1 min', ''], [true, `Store open/close vs ${CFG.store.open_time}–${CFG.store.close_time} (+${CFG.store.grace_minutes} min grace)`, '']]

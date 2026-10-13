@@ -169,6 +169,7 @@ class Thresholds:
     queue_seconds: float = 60.0       # ... for this long
     unattended_seconds: float = 45.0  # customer in a zone with no staff nearby
     attend_distance: float = 0.25     # staff within this foot distance counts as attending
+    phone_detection: bool = False     # watch for hand-held phones at all (off: no phone boxes, alerts or MOBILE_USAGE detections)
     phone_seconds: float = 8.0        # staff holding a phone for this long
     staff_zone_seconds: float = 20.0  # time spent in a staff zone to be classified as staff
     phone_everyone: bool = False      # phone alerts for everyone when no staff zone is defined
