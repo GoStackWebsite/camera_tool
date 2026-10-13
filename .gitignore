@@ -50,3 +50,6 @@ datasets/*.cache
 
 # shared camera regions of this site (store fusion); an example is in docs/fusion.example.json
 data/fusion.json
+
+# live-view captures kept as evidence (people in the shop): local only
+docs/proof/
