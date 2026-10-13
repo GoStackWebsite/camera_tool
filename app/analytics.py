@@ -82,6 +82,20 @@ STAFF_ZONE_AWAY_SECONDS = 45.0   # staff by zone only, then this long outside ev
 MODEL_MAX_DEMOTIONS = 2      # the uniform model changed its mind about a person this often: their clothing is
                              # ambiguous (dark top), so clothing alone no longer makes them staff
 MODEL_RETRY_PROB = 0.90      # after one demotion a second promotion needs a full window at this mean
+SAMPLE_SECONDS = 0.5         # clothing samples per person: one every half second ...
+SAMPLE_FAST_SECONDS = 0.15   # ... and one every 0.15 s until the person has been judged for the first time
+MODEL_FAST_SAMPLES = 5       # quick verdict: this many clean samples, every one at or above MODEL_FAST_PROB (both
+MODEL_FAST_PROB = 0.90       # models sure of the uniform on a clear view) -> staff about a second after coming into view
+MODEL_FAST_CUSTOMER = 0.50   # ... and every one at or below this -> judged a customer just as quickly
+MODEL_MIN_SPAN = 3.0         # the ordinary verdict (mean over the window) needs its samples spread over this many seconds
+JUDGE_MAX_SECONDS = 6.0      # nobody stays "identifying" longer than this: without a usable view they count as visitors
+ENTRY_HOLD_SECONDS = 6.0     # an IN crossing is booked (customer walk-in or staff) once the person has been judged, at
+                             # the latest after this long: staff walking back in are not walk-ins
+REFIND_SECONDS = 4.0         # a person appearing where one was lost this recently, within STAFF_GHOST_DISTANCE, is the
+                             # same person: verdict, votes, manual tag and demographics carry over (tracker id switch)
+EDGE_MARGIN = 0.02           # a box ending this close to the frame border belongs to someone who may have walked out
+MODEL_PEER_DEMOTE = 0.65     # two cameras see one person (store fusion): "uniform" is taken back when the other view says
+                             # customer and the pooled score of both views is at or below this
 
 
 def logo_mask(hsv: np.ndarray, hues: list, tol: int = 4) -> np.ndarray:
@@ -175,6 +189,18 @@ class Track:
     staff_zone_time: float = 0.0                    # banked seconds inside staff zones (drains while outside)
     staff_zone_out: float = 0.0                     # seconds since the person was last inside a staff zone
     model_demotions: int = 0                        # times the uniform model took "staff" back from this person
+    judged: bool = False                            # staff or customer has been decided at least once
+    first_vote_ts: float = 0.0                      # when the first clothing sample was taken
+    pending_entry: float | None = None              # time of an IN crossing that is not booked yet (see _settle_entry)
+    handed_over: bool = False                       # a newer track already took over this (lost) track's identity
+    store_id: int | None = None                     # store fusion: this person's id on the store's overview camera
+    store_cam: str = ""                             # ... and that camera's id
+    duplicate: bool = False                         # a second view of someone the overview camera already counts
+    peer_sum: float = 0.0                           # the other camera's clothing votes for the same person
+    peer_n: int = 0
+    peer_zone: str = ""                             # staff zone the person stands in on the other camera
+    linked_s: float = 0.0                           # seconds this track has been linked to another camera's track
+    zone_vid: dict = field(default_factory=dict)    # zone -> visitor id its ZONE_ENTER was sent with
     group_id: str | None = None
     crossed_in: bool = False
     phone_since: float | None = None
@@ -220,7 +246,11 @@ class Analytics:
         self.thr = thr
         self.staff_cfg = staff_cfg or StaffConfig()
         self.staff_model = staff_model            # app.staffcls.StaffClassifier (learned uniform), optional
-        self._staff_ghosts: list = []             # (lost_at, fx, fy, banked seconds, is_staff, reason, brand) of tracks lost in a staff zone
+        self._ghosts: list = []                   # identities of recently lost tracks (see _leave_ghost / _inherit_identity)
+        self.fusion = None                        # app.fusion.StoreFusion when several cameras share floor (set by the manager)
+        self.id_tag = ""                          # on-screen prefix of this camera's own track numbers ("B-" on a second camera)
+        self._fusion_ts = 0.0
+        self._frame_wh = (0, 0)
         self.brand_model = brand_model            # app.staffcls.BrandClassifier (which brand's uniform), optional
         self.store = store
         self.alerts = alerts
@@ -250,8 +280,10 @@ class Analytics:
         with self._lock:
             self.session_start = time.time()
             self.events: deque = deque(maxlen=500)
-            self.entries = 0
+            self.entries = 0                # customers only; staff crossings are counted separately
             self.exits = 0
+            self.staff_entries = 0
+            self.staff_exits = 0
             self.passby = 0
             self.groups_in = 0
             self.unique_ids: set[int] = set(self.tracks.keys())
@@ -348,6 +380,8 @@ class Analytics:
         aspect = width / height if height else 1.0
         with self._lock:
             seen: set[int] = set()
+            self._frame_wh = (width, height)
+            ids_now = {d.track_id for d in dets if d.is_person}
             persons = [d for d in dets if d.is_person]
             phones = [d for d in dets if not d.is_person]
             for d in persons:
@@ -363,6 +397,13 @@ class Analytics:
                     t.side_pt = (fx, fy) if t.side else None
                     self._event(now, "enter", d.track_id, f"Person #{d.track_id} appeared")
                     dt = 0.0
+                    t.judged = self.staff_model is None        # nothing to wait for without a learned model
+                    self._inherit_identity(t, now, fx, fy, ids_now)
+                    if self.fusion is not None:
+                        link = self.fusion.quick_link(self.cam.id, t.id, (fx, fy))
+                        if link is not None:
+                            t.store_id, t.store_cam = link
+                            t.duplicate = True
                 else:
                     _, px, py = t.history[-1]
                     t.path_len += math.hypot((fx - px) * aspect, fy - py)
@@ -380,6 +421,10 @@ class Analytics:
                 if self.cam.passby_line:
                     self._update_passby(t, now, fx, fy)
                 self._update_zones(t, now, fx, fy, dt)
+                if not t.judged and (t.is_staff or now - t.first_seen >= JUDGE_MAX_SECONDS):
+                    t.judged = True
+                if t.pending_entry is not None:
+                    self._settle_entry(t, now)
                 self._heat_add(fx, fy)
                 self.ce_heat[min(17, max(0, int(fy * 18))), min(31, max(0, int(fx * 32)))] += 1
 
@@ -397,7 +442,7 @@ class Analytics:
                 del self.tracks[tid]
 
             active = [t for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
-            customers = [t for t in active if not t.is_staff]
+            customers = [t for t in active if not t.is_staff and t.judged]      # "identifying" people are not counted yet
             staff = [t for t in active if t.is_staff]
             fdt = min(1.0, now - self._prev_update) if self._prev_update else 0.0
             self._prev_update = now
@@ -417,7 +462,7 @@ class Analytics:
     def snapshot(self, now: float) -> dict:
         with self._lock:
             active = [t for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
-            customers = [t for t in active if not t.is_staff]
+            customers = [t for t in active if not t.is_staff and t.judged]
             act = {a: 0 for a in ACTIVITIES}
             for t in customers:
                 act[t.activity] += 1
@@ -451,6 +496,12 @@ class Analytics:
                 "unique": len(self.unique_ids),
                 "entries": self.entries,
                 "exits": self.exits,
+                "staff_entries": self.staff_entries,
+                "staff_exits": self.staff_exits,
+                "identifying": sum(1 for t in active if not t.is_staff and not t.judged),
+                "id_tag": self.id_tag,
+                "dup_customers": sum(1 for t in customers if t.duplicate),      # also counted by the store's overview camera
+                "dup_staff": sum(1 for t in active if t.is_staff and t.duplicate),
                 "passby": self.passby,
                 "served_today": dict(self.served_today),
                 "staff_brands": {b: sum(1 for t in active if t.is_staff and t.brand == b) for b in {t.brand for t in active if t.is_staff and t.brand}},
@@ -481,7 +532,9 @@ class Analytics:
                         "brand": t.brand, "served": self._served_live(t) or None,
                         "phone_demo_pct": round(100 * t.phone_near / t.phone_total) if t.phone_total else None,
                         "foot": [round(t.foot[0], 3), round(t.foot[1], 3)],
-                        "zone_bank": round(t.staff_zone_time, 1), "demotions": t.model_demotions,
+                        "zone_bank": round(t.staff_zone_time, 1), "demotions": t.model_demotions, "judged": t.judged,
+                        "store_id": t.store_id, "store_cam": t.store_cam,
+                        "peer_pct": round(100 * t.peer_sum / t.peer_n, 1) if t.peer_n else None,
                     }
                     for t in sorted(active, key=lambda t: t.id)
                 ],
@@ -712,16 +765,21 @@ class Analytics:
         within = -0.1 <= u <= 1.1                    # inside the drawn segment (with a little slack)
         if within and now - t.last_cross_ts >= self.thr.line_cooldown_seconds:
             if s > 0:
-                self.entries += 1
-                self._minute["entries"] += 1
+                if t.pending_entry is not None:
+                    self._book_entry(t)              # in, out and in again within the hold: book the first one
                 t.crossed_in = True
                 t.group_id = self._assign_group(now, fx, fy, t)
                 self._event(now, "line_in", t.id, f"Person #{t.id} crossed IN")
-                self._record_crossing(now, "in", t)
-                self._emit_ce("ENTRY", t, now)
+                t.pending_entry = now
+                self._settle_entry(t, now)
             else:
-                self.exits += 1
-                self._minute["exits"] += 1
+                if t.pending_entry is not None:
+                    self._book_entry(t)              # stepped in and straight out: keep the order ENTRY, EXIT
+                if t.is_staff:
+                    self.staff_exits += 1
+                else:
+                    self.exits += 1
+                    self._minute["exits"] += 1
                 self._event(now, "line_out", t.id, f"Person #{t.id} crossed OUT")
                 self._record_crossing(now, "out", t)
                 self._emit_ce("EXIT", t, now, dwell=now - t.first_seen)
@@ -729,6 +787,23 @@ class Analytics:
         t.side = s
         t.side_pt = (fx, fy)
         t.pending_side = t.pending_n = 0
+
+    def _settle_entry(self, t: Track, now: float) -> None:
+        """Book a held IN crossing as soon as it is known who came in: staff, a customer, or nobody could tell in
+        ENTRY_HOLD_SECONDS. People enter under the camera, where no clothing is visible, so at the moment of the
+        crossing everybody would be a customer and every member of staff coming back in a walk-in."""
+        if t.is_staff or t.judged or not self.staff_detection_active or now - t.pending_entry >= ENTRY_HOLD_SECONDS:
+            self._book_entry(t)
+
+    def _book_entry(self, t: Track) -> None:
+        ts, t.pending_entry = t.pending_entry, None
+        if t.is_staff:
+            self.staff_entries += 1
+        else:
+            self.entries += 1
+            self._minute["entries"] += 1
+        self._record_crossing(ts, "in", t)
+        self._emit_ce("ENTRY", t, ts)
 
     def _assign_group(self, now: float, fx: float, fy: float, t: Track) -> str:
         """People crossing IN within group_window seconds and close together count as one group."""
@@ -765,32 +840,133 @@ class Analytics:
                 self._leave_zone(t, z.name, now)
             if inside and z.role == "staff":
                 staff_zone = z.name
-        if staff_zone is not None and len(t.history) == 1:
-            self._inherit_staff_ghost(t, now, fx, fy)
-        self._update_staff_zone(t, now, dt, staff_zone)
+        self._update_staff_zone(t, now, dt, staff_zone or (t.peer_zone or None))
 
-    def _inherit_staff_ghost(self, t: Track, now: float, fx: float, fy: float) -> None:
-        """A new track that starts inside a staff zone, where a track was lost moments ago, is that person again:
-        it keeps the banked zone time and the staff status instead of starting as a customer."""
-        self._staff_ghosts = [g for g in self._staff_ghosts if now - g[0] <= STAFF_GHOST_SECONDS]
-        best = min(self._staff_ghosts, key=lambda g: math.hypot(g[1] - fx, g[2] - fy), default=None)
-        if best is None or math.hypot(best[1] - fx, best[2] - fy) > STAFF_GHOST_DISTANCE:
+    # ---- store fusion: what another camera knows about the same person ----
+    def fusion_view(self, now: float) -> list[dict]:
+        """The live tracks as the store fusion needs them (position, clothing colour, verdict and its evidence)."""
+        with self._lock:
+            staff_zones = [z.name for z in self.cam.zones if z.role == "staff"]
+            return [{"id": t.id, "foot": t.foot, "torso": t.torso, "is_staff": t.is_staff, "reason": t.staff_reason,
+                     "manual": t.manual_staff, "vsum": float(sum(t.model_votes)), "vn": len(t.model_votes),
+                     "staff_zone": next((z for z in staff_zones if z in t.zones), ""), "zones": list(t.zone_seq)}
+                    for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
+
+    def apply_fusion(self, links: dict, now: float, tag: str = "") -> None:
+        """links: track id -> {"store_id", "store_cam", "duplicate", "peers": [views of the same person elsewhere]}.
+        Tracks that are not in it stand alone again. tag: prefix for this camera's own numbers on screen."""
+        with self._lock:
+            self.id_tag = tag
+            dt = min(1.0, now - self._fusion_ts) if self._fusion_ts else 0.0
+            self._fusion_ts = now
+            for t in self.tracks.values():
+                l = links.get(t.id)
+                if l is None:
+                    if t.peer_n or t.store_id is not None or t.peer_zone or t.duplicate:
+                        t.store_id, t.store_cam, t.duplicate = None, "", False
+                        t.peer_sum, t.peer_n, t.peer_zone = 0.0, 0, ""
+                    continue
+                t.store_id, t.store_cam, t.duplicate = l["store_id"], l["store_cam"], l["duplicate"]
+                if l["duplicate"]:
+                    t.linked_s += dt
+                peers = l["peers"]
+                t.peer_sum = sum(p["vsum"] for p in peers)
+                t.peer_n = sum(p["vn"] for p in peers)
+                t.peer_zone = next((p["staff_zone"] for p in peers if p["staff_zone"]), "")
+                for p in peers:
+                    if p["manual"] is not None and t.manual_staff is None:        # a manual tag counts on every camera
+                        t.manual_staff = p["manual"]
+                        t.is_staff, t.staff_reason = bool(p["manual"]), ("manual" if p["manual"] else "")
+                    if not l["duplicate"]:                                          # overview track: one journey per person
+                        for z in p["zones"]:
+                            if z not in t.zone_seq:
+                                t.zone_seq.append(z)
+                self._reconcile_peer(t, now)
+
+    def _reconcile_peer(self, t: Track, now: float) -> None:
+        """Two cameras, one person, one verdict on the clothing: pool the votes of both views."""
+        pn = t.peer_n
+        if pn < MODEL_MIN_SAMPLES or t.manual_staff is not None or self.staff_model is None:
             return
-        self._staff_ghosts.remove(best)
-        _, _, _, bank, was_staff, reason, brand = best
-        t.staff_zone_time = bank
-        if was_staff and t.manual_staff is None:
-            t.is_staff = True
-            t.staff_reason = reason
-            t.brand = brand
+        n = len(t.model_votes)
+        pmean = t.peer_sum / pn
+        pooled = (sum(t.model_votes) + t.peer_sum) / (n + pn)
+        if t.is_staff and t.staff_reason == "uniform" and pmean <= MODEL_RECENT_DEMOTE and pooled <= MODEL_PEER_DEMOTE:
+            t.is_staff = False
+            t.staff_reason = ""
+            t.brand = None
+            t.model_demotions += 1
+            self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff (the other camera sees a customer), counted as customer")
+        elif (not t.is_staff and t.model_demotions < MODEL_MAX_DEMOTIONS and pmean >= MODEL_STAFF_PROB and pooled >= MODEL_STAFF_PROB):
+            self._set_staff(t, now, "uniform")          # the other camera has the clear view of the uniform
+            t.judged = True
 
-    def _leave_staff_ghost(self, t: Track) -> None:
-        """Remember a track that was lost while inside a staff zone (see _inherit_staff_ghost)."""
-        if t.staff_zone_out == 0.0 and t.staff_zone_time > 0.0 and t.manual_staff is None:
-            fx, fy = t.foot
-            self._staff_ghosts.append((t.last_seen, fx, fy, t.staff_zone_time, t.is_staff and t.staff_reason in ("staff zone", "uniform"),
-                                       t.staff_reason, t.brand))
-            del self._staff_ghosts[:-20]
+    def _at_edge(self, t: Track) -> bool:
+        """The box ends at the frame border: the person may have walked out of view there."""
+        w, h = self._frame_wh
+        if not w or not h:
+            return False
+        x1, _, x2, y2 = t.bbox
+        return x1 <= EDGE_MARGIN * w or x2 >= (1.0 - EDGE_MARGIN) * w or y2 >= (1.0 - CLIPPED_EDGE) * h
+
+    def _ghost(self, t: Track) -> dict:
+        """What is known about a track's identity, to hand to the track that continues it."""
+        fx, fy = t.foot
+        in_zone = t.staff_zone_out == 0.0 and t.staff_zone_time > 0.0
+        return {"ts": t.last_seen, "fx": fx, "fy": fy, "in_zone": in_zone, "edge": self._at_edge(t), "bank": t.staff_zone_time,
+                "is_staff": t.is_staff, "reason": t.staff_reason, "manual": t.manual_staff, "brand": t.brand,
+                "brand_votes": dict(t.brand_votes), "votes": list(t.model_votes), "demotions": t.model_demotions,
+                "judged": t.judged, "first_vote_ts": t.first_vote_ts, "gender_votes": list(t.gender_votes),
+                "age_samples": list(t.age_samples), "face_samples": t.face_samples, "gender": t.gender, "age": t.age}
+
+    def _leave_ghost(self, t: Track) -> None:
+        """Remember a closed track so that the same person, found again at the same spot, is not judged from scratch."""
+        if not t.handed_over:
+            self._ghosts.append(self._ghost(t))
+            del self._ghosts[:-40]
+
+    def _inherit_identity(self, t: Track, now: float, fx: float, fy: float, ids_now: set) -> None:
+        """A new track id is usually an old acquaintance: the tracker lost someone for a moment and found them
+        again under a new number. If a track was lost at this spot moments ago, the new one takes over what was
+        known about that person (staff or customer, the votes behind it, a manual tag, banked staff-zone time,
+        gender and age) instead of starting as "identifying". Inside a staff zone the memory is long (a seated
+        cashier of whom only the head shows flickers for minutes); on the open floor it is a few seconds and not
+        used at the frame border, where one person leaving and another arriving look the same."""
+        best, bd = None, STAFF_GHOST_DISTANCE
+        for key, o in self.tracks.items():               # lost a moment ago, not closed yet
+            if o is t or key in ids_now or o.handed_over or now - o.last_seen > LOST_TIMEOUT:
+                continue
+            in_zone = o.staff_zone_out == 0.0 and o.staff_zone_time > 0.0
+            if not in_zone and self._at_edge(o):
+                continue
+            d = math.hypot(o.foot[0] - fx, o.foot[1] - fy)
+            if d <= bd:
+                best, bd = o, d
+        self._ghosts = [g for g in self._ghosts if now - g["ts"] <= STAFF_GHOST_SECONDS]
+        ghost = None
+        for g in self._ghosts:                           # closed already
+            if now - g["ts"] > (STAFF_GHOST_SECONDS if g["in_zone"] else REFIND_SECONDS) or (g["edge"] and not g["in_zone"]):
+                continue
+            d = math.hypot(g["fx"] - fx, g["fy"] - fy)
+            if d <= bd:
+                best, bd, ghost = g, d, g
+        if best is None:
+            return
+        if ghost is not None and best is ghost:
+            self._ghosts.remove(ghost)
+            g = ghost
+        else:
+            best.handed_over = True
+            g = self._ghost(best)
+        if g["in_zone"]:
+            t.staff_zone_time = g["bank"]
+        t.manual_staff = g["manual"]
+        t.is_staff, t.staff_reason = g["is_staff"], g["reason"]
+        t.brand, t.brand_votes = g["brand"], dict(g["brand_votes"])
+        t.model_votes.extend(g["votes"])
+        t.model_demotions, t.judged, t.first_vote_ts = g["demotions"], g["judged"] or t.judged, g["first_vote_ts"]
+        t.gender_votes, t.age_samples, t.face_samples = list(g["gender_votes"]), list(g["age_samples"]), g["face_samples"]
+        t.gender, t.age = g["gender"], g["age"]
 
     def _update_staff_zone(self, t: Track, now: float, dt: float, zone: str | None) -> None:
         """A staff zone says where someone stands, not who they are. So the presence has to be sustained (time
@@ -844,7 +1020,9 @@ class Analytics:
         self._event(now, "staff", t.id, f"Person #{t.id} classified as staff ({reason})", zone)
 
     def _sample_torso(self, t: Track, frame: np.ndarray, now: float) -> None:
-        if now - t.torso_ts < 0.5:            # one sample every half second spreads votes over time
+        # one sample every half second spreads votes over time; until the first verdict they come much faster,
+        # so that staff are staff about a second after they come into view
+        if now - t.torso_ts < (SAMPLE_SECONDS if t.judged or self.staff_model is None else SAMPLE_FAST_SECONDS):
             return
         t.torso_ts = now
         x1, y1, x2, y2 = t.bbox
@@ -901,16 +1079,24 @@ class Analytics:
                     # calls some dark-clothed customers staff, but rarely the same ones (validation: 0 of 164)
                     prob = (prob + 1.0 - second[0]) / 2
                 t.model_votes.append(prob)
+                t.first_vote_ts = t.first_vote_ts or now
                 n = len(t.model_votes)
                 mean = sum(t.model_votes) / n
                 recent = list(t.model_votes)[-MODEL_RECENT_N:]
+                spread = n >= MODEL_MIN_SAMPLES and now - t.first_vote_ts >= MODEL_MIN_SPAN
                 by_zone = t.is_staff and t.staff_reason == "staff zone"
                 if t.model_demotions:      # the model already took "staff" back once: ask for a full, clearer window
                     strong = (t.model_demotions < MODEL_MAX_DEMOTIONS and n >= t.model_votes.maxlen
                               and mean >= MODEL_RETRY_PROB and min(t.model_votes) >= MODEL_RECENT_MIN)
                 else:
-                    strong = (n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB
-                              and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN)
+                    # quick: a handful of samples, every one very sure. Ordinary: a longer window that is sure on average
+                    strong = ((n >= MODEL_FAST_SAMPLES and min(t.model_votes) >= MODEL_FAST_PROB)
+                              or (spread and mean >= MODEL_STAFF_PROB
+                                  and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN))
+                if strong and t.peer_n >= MODEL_FAST_SAMPLES and t.peer_sum / t.peer_n < MODEL_RECENT_MIN:
+                    strong = False                  # another camera sees the same person and says customer
+                if not t.judged and (strong or spread or (n >= MODEL_FAST_SAMPLES and max(t.model_votes) <= MODEL_FAST_CUSTOMER)):
+                    t.judged = True
                 if (not t.is_staff or by_zone) and strong:
                     # a stable run of confident samples (both models agreeing), not a few early ones while the
                     # person was half visible
@@ -1038,14 +1224,17 @@ class Analytics:
 
     def _close_track(self, t: Track, now: float) -> None:
         dwell = t.last_seen - t.first_seen
-        self._leave_staff_ghost(t)
+        self._leave_ghost(t)
         if (not t.is_staff and t.manual_staff is None and t.staff_zone_out == 0.0 and t.staff_zone_time >= 0.6 * max(dwell, 1.0)
                 and not self._clearly_not_uniform(t)):
             # lost inside a staff zone after spending (nearly) all of its time there, and nothing says "customer":
             # a fragment of someone behind the counter, not a customer visit
             t.is_staff = True
             t.staff_reason = "staff zone"
-        if not t.is_staff:
+        if t.pending_entry is not None:
+            self._book_entry(t)                 # gone before anybody could tell: booked with what is known now
+        second_view = t.duplicate or t.linked_s >= 0.5 * max(dwell, 1.0)     # the overview camera records this person's visit
+        if not t.is_staff and not second_view:
             self.completed_dwells.append(dwell)
         for zname in list(t.zones):
             self._leave_zone(t, zname, t.last_seen)
@@ -1058,7 +1247,7 @@ class Analytics:
             # zone analytics (visits, dwell, gender) become the brand's walk-ins
             self._emit_ce("ZONE_ENTER", t, max(t.first_seen, t.last_seen - t.served[brand]), zone=f"Served by {brand}")
             self._emit_ce("ZONE_EXIT", t, t.last_seen, zone=f"Served by {brand}", dwell=t.served[brand])
-        if self.store:
+        if self.store and not second_view:
             self.store.add_visit({"camera_id": self.cam.id, "track_id": t.id, "start_ts": t.first_seen,
                                   "end_ts": t.last_seen, "dwell": dwell, "engaged": dwell >= self.thr.engage_seconds,
                                   "is_staff": t.is_staff, "zones": t.zone_seq, "crossed_in": t.crossed_in,

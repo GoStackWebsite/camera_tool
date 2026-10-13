@@ -54,6 +54,7 @@ class StaffClassifier:
         self.path = path
         self.mtime = os.path.getmtime(path)
         self.model = YOLO(str(path))
+        self.imgsz = int(self.model.overrides.get("imgsz") or IMGSZ)    # the size the model was trained at
         names = self.model.names
         self.staff_idx = next((i for i, n in names.items() if str(n).lower() == "staff"), None)
         if self.staff_idx is None:
@@ -79,7 +80,7 @@ class StaffClassifier:
         if crop is None:
             return None
         try:
-            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            r = self.model.predict(mask_head(crop), imgsz=self.imgsz, verbose=False)[0]
             self.samples += 1
             return float(r.probs.data[self.staff_idx])
         except Exception as e:
@@ -102,6 +103,7 @@ class BrandClassifier:
         self.path = path
         self.mtime = os.path.getmtime(path)
         self.model = YOLO(str(path))
+        self.imgsz = int(self.model.overrides.get("imgsz") or IMGSZ)    # the size the model was trained at
         self.names = {int(k): str(v) for k, v in self.model.names.items()}
         self.brands = [n for n in self.names.values() if n.lower() != "customer"]
         if not self.brands:
@@ -127,7 +129,7 @@ class BrandClassifier:
         if crop is None:
             return None
         try:
-            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            r = self.model.predict(mask_head(crop), imgsz=self.imgsz, verbose=False)[0]
             probs = r.probs.data.float().cpu().tolist()
             self.samples += 1
             best = max((i for i, n in self.names.items() if n.lower() != "customer"), key=lambda i: probs[i])
@@ -142,7 +144,7 @@ class BrandClassifier:
         if crop is None:
             return None
         try:
-            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            r = self.model.predict(mask_head(crop), imgsz=self.imgsz, verbose=False)[0]
             probs = r.probs.data.float().cpu().tolist()
             self.samples += 1
             ci = next((i for i, n in self.names.items() if n.lower() == "customer"), None)
@@ -158,7 +160,7 @@ class BrandClassifier:
         if crop is None:
             return None
         try:
-            r = self.model.predict(mask_head(crop), imgsz=IMGSZ, verbose=False)[0]
+            r = self.model.predict(mask_head(crop), imgsz=self.imgsz, verbose=False)[0]
             probs = r.probs.data.float().cpu().tolist()
             idx = next((i for i, n in self.names.items() if n.lower() == "customer"), None)
             return float(probs[idx]) if idx is not None else None

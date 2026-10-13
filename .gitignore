@@ -47,3 +47,6 @@ datasets/brand/
 datasets/*.cache
 # the portable brand model travels with the staff model
 !models/brand_cls.pt
+
+# shared camera regions of this site (store fusion); an example is in docs/fusion.example.json
+data/fusion.json

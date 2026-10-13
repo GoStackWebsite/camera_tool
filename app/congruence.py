@@ -266,7 +266,15 @@ class CongruenceConnector:
             if zid is None:             # unmapped zone: nothing to send
                 return
         tid = f"{local_cam}-{self.session_id}-{t.id}"
-        ev = {"cameraId": cid, "type": etype, "ts": iso(now), "trackId": tid, "visitorId": tid,
+        # one visitor id per person and store: a track linked to the overview camera's track (store fusion) uses that id,
+        # so the server joins what both cameras saw into one visit
+        vid = f"{t.store_cam}-{self.session_id}-{t.store_id}" if getattr(t, "store_id", None) and getattr(t, "store_cam", "") else tid
+        if zone is not None and hasattr(t, "zone_vid"):
+            if etype == "ZONE_ENTER":
+                t.zone_vid[zone] = vid
+            elif etype == "ZONE_EXIT":
+                vid = t.zone_vid.pop(zone, vid)      # leave the zone under the id it was entered with
+        ev = {"cameraId": cid, "type": etype, "ts": iso(now), "trackId": tid, "visitorId": vid,
               "isStaff": bool(t.is_staff), "gender": t.gender if t.gender in ("M", "F") else "U",
               "ageBand": ce_age_band(t.age)}
         if zid is not None:

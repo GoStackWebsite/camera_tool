@@ -49,10 +49,45 @@ class FakeBrand:
         return {"loaded": True}
 
 
-def make(with_model: bool = True, brand: FakeBrand | None = None, zone: list | None = None):
-    cam = CameraConfig(id="t", name="test", url="", zones=[ZoneConfig("Counter staff side", zone or STAFF_ZONE, "staff")])
+class FakeEmitter:
+    """Stands in for the Congruence Eye connector: records what would be sent."""
+
+    def __init__(self):
+        self.sent: list[tuple] = []
+
+    def visitor_event(self, cam, etype, t, ts, zone=None, dwell=None):
+        self.sent.append((etype, bool(t.is_staff), round(ts, 2)))
+
+
+DOOR_LINE = [[0.99, 0.90], [0.01, 0.90]]            # like the shop: people come in from the frame bottom, IN is above
+
+
+def make(with_model: bool = True, brand: FakeBrand | None = None, zone: list | None = None, line: list | None = None):
+    cam = CameraConfig(id="t", name="test", url="", line=line, zones=[ZoneConfig("Counter staff side", zone or STAFF_ZONE, "staff")])
     model = FakeModel() if with_model else None
-    return A.Analytics(cam, Thresholds(), None, None, StaffConfig(), model, brand), model
+    an = A.Analytics(cam, Thresholds(), None, None, StaffConfig(), model, brand)
+    an.emitter = FakeEmitter()
+    return an, model
+
+
+def walk_in(an, model, track_id: int, prob: float | None, t0: float, x: float = 0.45, step: float = 0.07) -> tuple[float, float]:
+    """Someone comes in under the camera: a short clipped box at the bottom first (no clothing visible), then the
+    whole person walking up the shop. Returns (end time, time the count line was crossed)."""
+    t, crossed = t0, None
+    for y, height in ((1.0, 120), (1.0, 150), (0.999, 200), (0.97, 300), (0.93, 300), (0.89, 300), (0.86, 300), (0.82, 300), (0.78, 300)):
+        d = det(track_id, (x, y), height)
+        model.by_x[d.x1] = prob
+        an.update([d], W, H, t, None, FRAME)
+        if crossed is None and y < 0.89:
+            crossed = t
+        t += step * 3
+    end = t + 8.0
+    while t < end:                                       # then stands in the shop
+        d = det(track_id, (x, 0.78))
+        model.by_x[d.x1] = prob
+        an.update([d], W, H, t, None, FRAME)
+        t += step
+    return t, crossed
 
 
 def det(track_id: int, foot: tuple[float, float], height: int = 300) -> Detection:
@@ -191,6 +226,79 @@ def main() -> int:
     t = run(an, m, 41, (0.85, 0.993), zs + 5, 0.0, 1000.0, height=150)
     check("head-only crop at the frame bottom gives no 'customer' votes and the staff zone decides", an.tracks[41].is_staff and not an.tracks[41].model_votes,
           state(an, 41) + f" votes={len(an.tracks[41].model_votes)}")
+
+    # 12. how fast: a clear view of the uniform is staff in about a second, not five
+    an, m = make()
+    t = run(an, m, 50, ON_FLOOR, 1.2, 0.97, 1000.0, step=0.07)
+    check("clear view of the uniform: staff within 1.2 s of coming into view", an.tracks[50].is_staff, state(an, 50))
+    an, m = make()
+    t = run(an, m, 51, ON_FLOOR, 1.2, 0.05, 1000.0, step=0.07)
+    check("clear customer: judged (no longer 'identifying') within 1.2 s", an.tracks[51].judged and not an.tracks[51].is_staff, state(an, 51))
+    an, m = make()
+    t = run(an, m, 52, ON_FLOOR, 2.5, 0.85, 1000.0, step=0.07)
+    early = an.tracks[52].is_staff
+    t = run(an, m, 52, ON_FLOOR, 2.0, 0.85, t, step=0.07)
+    check("less clear view (0.85): not on a burst of samples, but after 3 s of them", not early and an.tracks[52].is_staff, f"early={early} " + state(an, 52))
+    an, m = make()
+    t = run(an, m, 53, ON_FLOOR, 0.5, None, 1000.0, step=0.07)
+    snap = an.snapshot(t)
+    check("someone not judged yet is 'identifying', not a customer", snap["occupancy"] == 0 and snap["identifying"] == 1, f"occupancy={snap['occupancy']} identifying={snap['identifying']}")
+    t = run(an, m, 53, ON_FLOOR, A.JUDGE_MAX_SECONDS, None, t, step=0.07)
+    snap = an.snapshot(t)
+    check("... and counts as a visitor once nobody could tell for 6 s", snap["occupancy"] == 1 and snap["identifying"] == 0, f"occupancy={snap['occupancy']}")
+
+    # 13. staff walking back in through the door are not walk-ins
+    an, m = make(line=DOOR_LINE)
+    t, crossed = walk_in(an, m, 60, 0.97, 1000.0)
+    entry = [e for e in an.emitter.sent if e[0] == "ENTRY"]
+    check("staff coming in: no customer walk-in is counted", an.entries == 0 and an.staff_entries == 1, f"entries={an.entries} staff_entries={an.staff_entries}")
+    check("... the entry is sent once, flagged staff, with the time of the crossing (not of the verdict)", len(entry) == 1 and entry[0][1] and 0 <= entry[0][2] - crossed <= 0.5, f"{entry} crossed={crossed:.2f}")
+    an, m = make(line=DOOR_LINE)
+    t, crossed = walk_in(an, m, 61, 0.03, 1000.0)
+    entry = [e for e in an.emitter.sent if e[0] == "ENTRY"]
+    check("customer coming in: one walk-in, time of the crossing", an.entries == 1 and an.staff_entries == 0 and len(entry) == 1 and not entry[0][1]
+          and 0 <= entry[0][2] - crossed <= 0.5, f"entries={an.entries} {entry} crossed={crossed:.2f}")
+    an, m = make(line=DOOR_LINE)
+    t, crossed = walk_in(an, m, 62, None, 1000.0)
+    check("nobody could tell who came in: booked as a walk-in after the hold", an.entries == 1 and len([e for e in an.emitter.sent if e[0] == "ENTRY"]) == 1, f"entries={an.entries}")
+    an, m = make(line=DOOR_LINE)
+    for i, y in enumerate((1.0, 0.97, 0.93, 0.88, 0.85, 0.82)):        # comes in and is lost at once
+        d = det(63, (0.45, y))
+        m.by_x[d.x1] = None
+        an.update([d], W, H, 1000.0 + 0.2 * i, None, FRAME)
+    before = an.entries
+    lose(an, 1001.2)
+    check("lost during the hold: the entry is booked when the track closes, not dropped", before == 0 and an.entries == 1, f"before={before} after={an.entries}")
+
+    # 14. the tracker gives someone a new number (id switch): they are not judged from scratch
+    an, m = make()
+    t = run(an, m, 70, ON_FLOOR, 3.0, 0.97, 1000.0, step=0.07)
+    d = det(71, ON_FLOOR)
+    m.by_x[d.x1] = 0.97
+    an.update([d], W, H, t, None, FRAME)
+    check("staff under a new track number at the same spot: staff from the first frame", an.tracks[71].is_staff and an.tracks[71].judged, state(an, 71))
+    an, m = make()
+    t = run(an, m, 72, ON_FLOOR, 3.0, 0.03, 1000.0, step=0.07)
+    d = det(73, ON_FLOOR)
+    m.by_x[d.x1] = 0.03
+    an.update([d], W, H, t, None, FRAME)
+    snap = an.snapshot(t)
+    check("customer under a new track number: still a counted customer, no 'identifying' gap", an.tracks[73].judged and snap["identifying"] == 0, f"judged={an.tracks[73].judged} identifying={snap['identifying']}")
+    an, m = make()
+    t = run(an, m, 74, ON_FLOOR, 3.0, 0.97, 1000.0, step=0.07)
+    an.set_staff(74, False)                              # the operator says: not staff
+    d = det(75, ON_FLOOR)
+    m.by_x[d.x1] = 0.97
+    an.update([d], W, H, t, None, FRAME)
+    t = run(an, m, 75, ON_FLOOR, 5.0, 0.97, t + 0.07, step=0.07)
+    check("a manual 'not staff' tag survives the id switch", not an.tracks[75].is_staff and an.tracks[75].manual_staff is False, state(an, 75))
+    an, m = make(line=DOOR_LINE)
+    t = run(an, m, 76, (0.45, 0.999), 3.0, 0.97, 1000.0, step=0.07)       # staff leaving, last seen at the frame bottom
+    t = lose(an, t, 2.0)
+    d = det(77, (0.45, 0.999))
+    m.by_x[d.x1] = None
+    an.update([d], W, H, t, None, FRAME)
+    check("at the door nothing carries over: the next person in is not the one who just left", not an.tracks[77].is_staff and not an.tracks[77].judged, state(an, 77))
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")

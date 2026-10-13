@@ -14,7 +14,8 @@ import cv2
 from .alerts import AlertManager
 from .analytics import Analytics
 from .camera import RTSPCamera
-from .config import MODELS_DIR, AppConfig, CameraConfig, ConfigStore, Settings, StaffConfig, Thresholds, mask_url
+from .config import DATA_DIR, MODELS_DIR, AppConfig, CameraConfig, ConfigStore, Settings, StaffConfig, Thresholds, mask_url
+from .fusion import StoreFusion
 from .demographics import Demographics
 from .staffcls import BrandClassifier, StaffClassifier
 from .detector import PersonTracker
@@ -57,6 +58,8 @@ class Manager:
         self._day: dict = {"date": None, "opened_at": None, "last_presence": None, "open_late_fired": False,
                            "report_sent": False, "closed_fired": False}
         self._health_thread = threading.Thread(target=self._health_loop, name="health", daemon=True)
+        self.fusion = StoreFusion(DATA_DIR / "fusion.json")    # cameras that see the same floor: one person, one id
+        self._fusion_thread = threading.Thread(target=self._fusion_loop, name="fusion", daemon=True)
         self.report_builder = None   # set by server (avoids circular import)
         self.connector = None        # Congruence Eye connector (set by server)
         self.reconciler = None       # Congruence Eye managed-mode sync (set by server)
@@ -74,6 +77,17 @@ class Manager:
                 except Exception:
                     log.exception("Could not start camera %s", cam.id)
         self._health_thread.start()
+        self._fusion_thread.start()
+
+    def _fusion_loop(self) -> None:
+        while not self._stop.wait(0.3):
+            try:
+                with self.lock:
+                    analytics = {cid: rt.analytics for cid, rt in self.runtimes.items()}
+                if len(analytics) > 1 or self.fusion.active:
+                    self.fusion.tick(analytics, time.time())
+            except Exception:
+                log.exception("store fusion error")
 
     def stop(self) -> None:
         self._stop.set()
@@ -88,6 +102,7 @@ class Manager:
         staff_model = StaffClassifier.create(MODELS_DIR)      # learned uniform, when models/staff_cls.pt exists
         brand_model = BrandClassifier.create(MODELS_DIR)      # learned brand of the uniform, when models/brand_cls.pt exists
         analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model, brand_model)
+        analytics.fusion = self.fusion
         demographics = Demographics.create(MODELS_DIR) if self.config.demographics.enabled else None
         pipeline = Pipeline(camera, tracker, analytics, self.settings, cam.target_fps, demographics, self.config_store)
         rt = CameraRuntime(cam, camera, tracker, analytics, pipeline, time.time())
@@ -219,6 +234,8 @@ class Manager:
             totals["cameras_online"] += int(s["camera"]["connected"])
             for k in ("occupancy", "staff", "entries", "exits", "groups_in", "unique", "loitering", "phones"):
                 totals[k] += s.get(k, 0)
+            totals["occupancy"] -= s.get("dup_customers", 0)      # seen by two cameras: one person in the store
+            totals["staff"] -= s.get("dup_staff", 0)
             if s.get("occupancy"):
                 dwell_sum += s["avg_dwell"] * s["occupancy"]
                 dwell_n += s["occupancy"]
@@ -233,6 +250,7 @@ class Manager:
             "open_alerts": self.alerts.list_open(),
             "notifier": {"sent": self.notifier.sent, "last_error": self.notifier.last_error},
             "congruence": self.connector.status() if self.connector else None,
+            "fusion": self.fusion.status(),
             "staff_model": next((rt.analytics.staff_model.info() for rt in runtimes if rt.analytics.staff_model), {"loaded": False}),
             "brand_model": next((rt.analytics.brand_model.info() for rt in runtimes if rt.analytics.brand_model), {"loaded": False}),
             "demographics": {"enabled": self.config.demographics.enabled,

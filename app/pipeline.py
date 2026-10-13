@@ -23,6 +23,7 @@ COLORS = {  # BGR
     "engaged": (90, 174, 46),      # green: customer engaged (dwell >= engage_seconds)
     "lingering": (0, 165, 255),    # orange
     "staff": (205, 90, 106),       # purple
+    "identifying": (190, 190, 190),  # grey: not judged yet (neither staff nor customer)
     "phone": (0, 0, 255),
 }
 ROLE_COLORS = {  # BGR, zone outlines by role
@@ -151,14 +152,20 @@ def draw_overlay(frame: np.ndarray, tracks: list[Track], cam: CameraConfig, stat
         x1, y1, x2, y2 = t.bbox
         dwell = t.dwell(now)
         entry = time.strftime("%I:%M %p", time.localtime(t.first_seen)).lstrip("0").lower()
+        # the same person carries one id on every camera of the store; someone only this (second) camera sees keeps
+        # its own number with the camera's letter, so a bare number always means the overview camera's person
+        pid = getattr(t, "store_id", None) or (f"{stats['id_tag']}{t.id}" if stats.get("id_tag") else t.id)
         if t.is_staff:
             color = COLORS["staff"]
-            lines = [f"Staff ID: {t.id}", f"On floor: {_dur(dwell)}" + (f" - {t.staff_reason}" if t.staff_reason else "")]
+            lines = [f"Staff ID: {pid}", f"On floor: {_dur(dwell)}" + (f" - {t.staff_reason}" if t.staff_reason else "")]
+        elif not getattr(t, "judged", True):
+            color = COLORS["identifying"]       # just came into view: staff or customer is decided within a second or two
+            lines = [f"ID: {pid}", "identifying..."]
         else:
             engaged = dwell >= engage_seconds
             engaged_now += int(engaged)
             color = COLORS["lingering"] if t.loitering else (COLORS["engaged"] if engaged else COLORS["visitor"])
-            lines = [f"Visitor ID: {t.id}", f"Entry time: {entry}",
+            lines = [f"Visitor ID: {pid}", f"Entry time: {entry}",
                      f"{_dur(dwell)} - {t.activity}" + (" - engaged" if engaged else "") + (" - lingering" if t.loitering else "")]
             if t.gender:
                 lines.append(f"{'Man' if t.gender == 'M' else 'Woman'} - {t.age_band}")
