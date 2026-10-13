@@ -288,8 +288,10 @@ colour, and one person on each side is still not linked when their clothing is c
 
 - the person has **one id**: the overview camera's number on both screens and as Congruence Eye `visitorId`;
 - there is **one verdict**: the clothing scores of both views are pooled (a polo that looks like the uniform
-  from behind is seen from the front by the other camera), and a staff zone or a manual tag on either camera
-  counts on both;
+  from behind is seen from the front by the other camera). A region can name the camera with the better view
+  of clothing there (`"trust": "ce32"`, the close-up of the billing desk): that camera's verdict is then the
+  store's, and the other view is never used against it. A staff zone or a manual tag on either camera counts
+  on both;
 - the person is **counted once** in the store totals, and has one visit, which includes the zones of the
   second camera (the queue at the billing desk becomes part of the customer's journey).
 

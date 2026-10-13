@@ -60,12 +60,12 @@ class FakeStore:
 class Shop:
     """Two cameras of one store and the fusion between them."""
 
-    def __init__(self):
+    def __init__(self, trust: str = ""):
         self.dir = tempfile.TemporaryDirectory()
         cfg = Path(self.dir.name) / "fusion.json"
         cfg.write_text(json.dumps({"primary": "A", "regions": [
-            {"name": "Billing seat", "views": {"A": SEAT_A, "B": DESK_B}},
-            {"name": "Billing front", "views": {"A": FRONT_A, "B": FRONT_B}}]}), encoding="utf-8")
+            {"name": "Billing seat", "views": {"A": SEAT_A, "B": DESK_B}, "trust": trust},
+            {"name": "Billing front", "views": {"A": FRONT_A, "B": FRONT_B}, "trust": trust}]}), encoding="utf-8")
         self.fusion = StoreFusion(cfg)
         self.models = {"A": FakeModel(), "B": FakeModel()}
         self.stores = {"A": FakeStore(), "B": FakeStore()}
@@ -204,6 +204,22 @@ def main() -> int:
     s = Shop()
     s.run(4.0, {"A": [(71, A_FRONT, 0.03, WHITE, 300)], "B": [(100, B_FRONT, 0.03, (20, 20, 20), 300)]})
     check("one person each, but white against black clothing: not linked", s.track("B", 100).store_id is None, f"store_id={s.track('B', 100).store_id}")
+
+    # 12. a region may name the camera with the better view of clothing: its verdict is the store's
+    s = Shop(trust="B")
+    s.run(12.0, {"A": [(80, A_SEAT, 0.04, None, 300)], "B": [(110, B_DESK, 0.98, None, 300)]})          # cashier: poor view from above on A
+    a, b = s.track("A", 80), s.track("B", 110)
+    check("trusted close-up sees the uniform, the overview does not: 'uniform' is not taken back", b.is_staff and b.staff_reason == "uniform" and b.model_demotions == 0,
+          f"B: {who(b)} demotions={b.model_demotions}")
+    check("... and the overview camera follows it", a.is_staff, f"A: {who(a)}")
+    s = Shop(trust="B")
+    s.run(10.0, {"A": [(81, A_FRONT, 0.97, None, 300)], "B": [(111, B_FRONT, 0.04, None, 300)]})        # look-alike polo, logo seen by B
+    check("trusted close-up sees a customer: customer on both cameras", not s.track("A", 81).is_staff and not s.track("B", 111).is_staff,
+          f"A: {who(s.track('A', 81))}")
+    s = Shop(trust="B")
+    s.run(10.0, {"A": [(82, A_FRONT, 0.20, None, 300)], "B": [(112, B_FRONT, 0.97, None, 300)]})        # staff in front of the desk, odd angle on A
+    check("trusted close-up sees staff where the overview is unsure: staff on both cameras", s.track("A", 82).is_staff and s.track("B", 112).is_staff,
+          f"A: {who(s.track('A', 82))} | B: {who(s.track('B', 112))}")
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")

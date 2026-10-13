@@ -6,8 +6,9 @@ ids and its counts are the store's. A person standing in a shared region on a se
 person standing in that region on the overview camera, and from then on
 
 * carries the same id on both cameras (label, events, Congruence Eye ``visitorId``),
-* gets one verdict: the clothing votes of both views are pooled, a staff zone or a manual tag on either
-  camera counts for both,
+* gets one verdict: the clothing votes of both views are pooled, or, where a region names the camera with the
+  better view (``"trust"``: a close-up of the billing desk against an overview from above), that camera's
+  verdict on the clothing is the store's; a staff zone or a manual tag on either camera counts for both,
 * is counted once in the store totals; the second view adds its zones (a queue at the billing desk) to the
   person's journey instead of creating a visit of its own.
 
@@ -88,7 +89,9 @@ class StoreFusion:
                 for r in raw.get("regions") or []:
                     views = {str(c): [[float(p[0]), float(p[1])] for p in pts] for c, pts in (r.get("views") or {}).items() if len(pts) >= 3}
                     if primary in views and len(views) >= 2:
-                        regions.append({"name": str(r.get("name") or f"region {len(regions) + 1}"), "views": views})
+                        trust = str(r.get("trust") or "")
+                        regions.append({"name": str(r.get("name") or f"region {len(regions) + 1}"), "views": views,
+                                        "trust": trust if trust in views else ""})
             except Exception as e:
                 primary, regions, error = "", [], f"{self.path.name}: {e}"
                 log.warning("store fusion configuration not usable: %s", error)
@@ -187,8 +190,13 @@ class StoreFusion:
                 p = prim.get(l["pid"])
                 if d is None or p is None:
                     continue
-                per_cam[cam][tid] = {"store_id": p["id"], "store_cam": self.primary, "duplicate": True, "peers": [p]}
-                per_cam[self.primary].setdefault(p["id"], {"store_id": None, "store_cam": "", "duplicate": False, "peers": []})["peers"].append(d)
+                # which of the two cameras has the better view of clothing in this region ("trust" in fusion.json)?
+                trust = next((r["trust"] for r in self.regions if r["name"] == l["region"]), "")
+                per_cam[cam][tid] = {"store_id": p["id"], "store_cam": self.primary, "duplicate": True, "peers": [p],
+                                     "trust": "own" if trust == cam else "peer" if trust == self.primary else ""}
+                e = per_cam[self.primary].setdefault(p["id"], {"store_id": None, "store_cam": "", "duplicate": False, "peers": [], "trust": ""})
+                e["peers"].append(d)
+                e["trust"] = "own" if trust == self.primary else "peer" if trust == cam else e["trust"]
         others = sorted(c for c in analytics if c != self.primary)
         for cam, an in analytics.items():                                     # outside this object's lock
             # people only a second camera sees keep that camera's own number, marked with a letter ("B-7"): the bare

@@ -199,6 +199,7 @@ class Track:
     peer_sum: float = 0.0                           # the other camera's clothing votes for the same person
     peer_n: int = 0
     peer_zone: str = ""                             # staff zone the person stands in on the other camera
+    peer_trust: str = ""                            # whose view of the clothing counts here: "own", "peer" or "" (pooled)
     linked_s: float = 0.0                           # seconds this track has been linked to another camera's track
     zone_vid: dict = field(default_factory=dict)    # zone -> visitor id its ZONE_ENTER was sent with
     group_id: str | None = None
@@ -864,7 +865,7 @@ class Analytics:
                 if l is None:
                     if t.peer_n or t.store_id is not None or t.peer_zone or t.duplicate:
                         t.store_id, t.store_cam, t.duplicate = None, "", False
-                        t.peer_sum, t.peer_n, t.peer_zone = 0.0, 0, ""
+                        t.peer_sum, t.peer_n, t.peer_zone, t.peer_trust = 0.0, 0, "", ""
                     continue
                 t.store_id, t.store_cam, t.duplicate = l["store_id"], l["store_cam"], l["duplicate"]
                 if l["duplicate"]:
@@ -873,6 +874,7 @@ class Analytics:
                 t.peer_sum = sum(p["vsum"] for p in peers)
                 t.peer_n = sum(p["vn"] for p in peers)
                 t.peer_zone = next((p["staff_zone"] for p in peers if p["staff_zone"]), "")
+                t.peer_trust = l.get("trust", "")
                 for p in peers:
                     if p["manual"] is not None and t.manual_staff is None:        # a manual tag counts on every camera
                         t.manual_staff = p["manual"]
@@ -884,20 +886,23 @@ class Analytics:
                 self._reconcile_peer(t, now)
 
     def _reconcile_peer(self, t: Track, now: float) -> None:
-        """Two cameras, one person, one verdict on the clothing: pool the votes of both views."""
+        """Two cameras, one person, one verdict on the clothing. Where the region names the camera with the better
+        view, that view decides (the other one follows it and is never used against it); otherwise the votes of
+        both views are pooled."""
         pn = t.peer_n
-        if pn < MODEL_MIN_SAMPLES or t.manual_staff is not None or self.staff_model is None:
+        if pn < MODEL_MIN_SAMPLES or t.manual_staff is not None or self.staff_model is None or t.peer_trust == "own":
             return
         n = len(t.model_votes)
         pmean = t.peer_sum / pn
-        pooled = (sum(t.model_votes) + t.peer_sum) / (n + pn)
+        pooled = pmean if t.peer_trust == "peer" else (sum(t.model_votes) + t.peer_sum) / (n + pn)
         if t.is_staff and t.staff_reason == "uniform" and pmean <= MODEL_RECENT_DEMOTE and pooled <= MODEL_PEER_DEMOTE:
             t.is_staff = False
             t.staff_reason = ""
             t.brand = None
             t.model_demotions += 1
             self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff (the other camera sees a customer), counted as customer")
-        elif (not t.is_staff and t.model_demotions < MODEL_MAX_DEMOTIONS and pmean >= MODEL_STAFF_PROB and pooled >= MODEL_STAFF_PROB):
+        elif (not t.is_staff and pmean >= MODEL_STAFF_PROB and pooled >= MODEL_STAFF_PROB
+              and (t.peer_trust == "peer" or t.model_demotions < MODEL_MAX_DEMOTIONS)):
             self._set_staff(t, now, "uniform")          # the other camera has the clear view of the uniform
             t.judged = True
 
@@ -1099,7 +1104,7 @@ class Analytics:
                     strong = ((n >= MODEL_FAST_SAMPLES and min(t.model_votes) >= MODEL_FAST_PROB)
                               or (spread and mean >= MODEL_STAFF_PROB
                                   and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN))
-                if strong and t.peer_n >= MODEL_FAST_SAMPLES and t.peer_sum / t.peer_n < MODEL_RECENT_MIN:
+                if strong and t.peer_trust != "own" and t.peer_n >= MODEL_FAST_SAMPLES and t.peer_sum / t.peer_n < MODEL_RECENT_MIN:
                     strong = False                  # another camera sees the same person and says customer
                 if not t.judged and (strong or spread or (n >= MODEL_FAST_SAMPLES and max(t.model_votes) <= MODEL_FAST_CUSTOMER)):
                     t.judged = True
