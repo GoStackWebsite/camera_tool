@@ -70,6 +70,13 @@ MODEL_CUSTOMER_PROB = 0.40   # a "uniform" staff whose mean drops to this become
 MODEL_ZONE_PATIENCE = 30     # a staff zone promotes someone the model clearly sees out of uniform only after 30x the
                              # usual time (20 s -> 10 min): customers leaning on a counter have their feet hidden and
                              # their box ends on the counter top, inside a staff zone drawn over it
+STAFF_ZONE_BANK_MAX = 900.0  # seconds of staff-zone presence one person can bank; time outside drains it 1:1, so a
+                             # customer who brushes a zone edge now and then never adds up to "staff"
+STAFF_ZONE_AWAY_SECONDS = 45.0   # staff by zone only, then this long outside every staff zone: judged on clothing
+                                 # alone, and a customer who merely stood in the zone is a customer again
+MODEL_MAX_DEMOTIONS = 2      # the uniform model changed its mind about a person this often: their clothing is
+                             # ambiguous (dark top), so clothing alone no longer makes them staff
+MODEL_RETRY_PROB = 0.90      # after one demotion a second promotion needs a full window at this mean
 
 
 def logo_mask(hsv: np.ndarray, hues: list, tol: int = 4) -> np.ndarray:
@@ -160,7 +167,9 @@ class Track:
     run_alerted: bool = False
     path_len: float = 0.0
     is_staff: bool = False
-    staff_zone_time: float = 0.0
+    staff_zone_time: float = 0.0                    # banked seconds inside staff zones (drains while outside)
+    staff_zone_out: float = 0.0                     # seconds since the person was last inside a staff zone
+    model_demotions: int = 0                        # times the uniform model took "staff" back from this person
     group_id: str | None = None
     crossed_in: bool = False
     phone_since: float | None = None
@@ -466,6 +475,7 @@ class Analytics:
                         "brand": t.brand, "served": self._served_live(t) or None,
                         "phone_demo_pct": round(100 * t.phone_near / t.phone_total) if t.phone_total else None,
                         "foot": [round(t.foot[0], 3), round(t.foot[1], 3)],
+                        "zone_bank": round(t.staff_zone_time, 1), "demotions": t.model_demotions,
                     }
                     for t in sorted(active, key=lambda t: t.id)
                 ],
@@ -740,6 +750,7 @@ class Analytics:
                                      "group_id": t.group_id or f"{self.cam.id}-{t.id}", "is_staff": t.is_staff})
 
     def _update_zones(self, t: Track, now: float, fx: float, fy: float, dt: float) -> None:
+        staff_zone = None
         for z in self.cam.zones:
             inside = point_in_polygon(fx, fy, z.points)
             if inside and z.name not in t.zones:
@@ -752,11 +763,34 @@ class Analytics:
             elif not inside and z.name in t.zones:
                 self._emit_ce("ZONE_EXIT", t, now, zone=z.name, dwell=now - t.zones[z.name])
                 self._leave_zone(t, z.name, now)
-            if inside and z.role == "staff" and not t.is_staff and t.manual_staff is None:
-                t.staff_zone_time += dt
-                need = self.thr.staff_zone_seconds * (MODEL_ZONE_PATIENCE if self._clearly_not_uniform(t) else 1)
+            if inside and z.role == "staff":
+                staff_zone = z.name
+        self._update_staff_zone(t, now, dt, staff_zone)
+
+    def _update_staff_zone(self, t: Track, now: float, dt: float, zone: str | None) -> None:
+        """A staff zone says where someone stands, not who they are. So the presence has to be sustained (time
+        outside drains what was banked), and "staff" earned by position alone lapses once the person has been
+        out of every staff zone for a while, unless their clothing says staff too. Without this a customer
+        paying at the desk or leaning on the counter stayed staff for the rest of the visit."""
+        if zone is not None:
+            t.staff_zone_out = 0.0
+            patient = self.thr.staff_zone_seconds * MODEL_ZONE_PATIENCE
+            t.staff_zone_time = min(max(STAFF_ZONE_BANK_MAX, 1.5 * patient), t.staff_zone_time + dt)
+            if not t.is_staff and t.manual_staff is None:
+                need = patient if self._clearly_not_uniform(t) else self.thr.staff_zone_seconds
                 if t.staff_zone_time >= need:
-                    self._set_staff(t, now, "staff zone", z.name)
+                    self._set_staff(t, now, "staff zone", zone)
+            return
+        t.staff_zone_out += dt
+        t.staff_zone_time = max(0.0, t.staff_zone_time - dt)
+        if (t.is_staff and t.staff_reason == "staff zone" and t.manual_staff is None and self.staff_model is not None
+                and t.staff_zone_out >= STAFF_ZONE_AWAY_SECONDS and len(t.model_votes) >= MODEL_MIN_SAMPLES):
+            # uniformed staff have been confirmed as "uniform" by now (_sample_torso); the uniform model has seen
+            # enough of this person and did not confirm them
+            t.is_staff = False
+            t.staff_reason = ""
+            t.brand = None
+            self._event(now, "staff", t.id, f"Person #{t.id} left the staff zone and is not in uniform, counted as customer")
 
     def _clearly_not_uniform(self, t: Track) -> bool:
         """The learned model has seen enough of this person and their clothing is not the uniform."""
@@ -770,6 +804,13 @@ class Analytics:
             self.staff_model = model
             for t in self.tracks.values():
                 t.model_votes.clear()
+
+    def set_brand_model(self, model) -> None:
+        """Swap in a newly trained brand model (models/brand_cls.pt changed on disk); brands are voted again."""
+        with self._lock:
+            self.brand_model = model
+            for t in self.tracks.values():
+                t.brand_votes.clear()
 
     def _set_staff(self, t: Track, now: float, reason: str, zone: str | None = None) -> None:
         t.is_staff = True
@@ -822,7 +863,7 @@ class Analytics:
                         t.brand = best
         elif self.staff_cfg.brands:
             self._vote_brand(t, frame, anchored)
-        if t.manual_staff is not None or t.staff_reason not in ("", "uniform"):
+        if t.manual_staff is not None or t.staff_reason not in ("", "uniform", "staff zone"):
             return
         if self.staff_model is not None:
             # learned uniform classifier (models/staff_cls.pt): decides on its own, the colour rules below are
@@ -833,20 +874,30 @@ class Analytics:
                 n = len(t.model_votes)
                 mean = sum(t.model_votes) / n
                 recent = list(t.model_votes)[-MODEL_RECENT_N:]
-                if (not t.is_staff and n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB
-                        and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN
-                        and self._second_opinion_is_staff(t, frame)):
+                by_zone = t.is_staff and t.staff_reason == "staff zone"
+                if t.model_demotions:      # the model already took "staff" back once: ask for a full, clearer window
+                    strong = (t.model_demotions < MODEL_MAX_DEMOTIONS and n >= t.model_votes.maxlen
+                              and mean >= MODEL_RETRY_PROB and min(t.model_votes) >= MODEL_RECENT_MIN)
+                else:
+                    strong = (n >= MODEL_MIN_SAMPLES and mean >= MODEL_STAFF_PROB
+                              and len(recent) >= MODEL_RECENT_N and min(recent) >= MODEL_RECENT_MIN)
+                if (not t.is_staff or by_zone) and strong and self._second_opinion_is_staff(t, frame):
                     # a stable run of confident samples, not a few early ones while the person was half visible,
                     # and the independently trained brand model must not call the person a customer
-                    self._set_staff(t, now, "uniform")
+                    if by_zone:
+                        t.staff_reason = "uniform"      # position and clothing agree: stays staff outside the zone
+                    else:
+                        self._set_staff(t, now, "uniform")
                 elif t.is_staff and t.staff_reason == "uniform" and len(recent) >= MODEL_RECENT_N and sum(recent) / len(recent) <= MODEL_RECENT_DEMOTE:
                     t.is_staff = False
                     t.staff_reason = ""
                     t.brand = None
+                    t.model_demotions += 1
                     self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff (recent samples), counted as customer")
                 elif t.is_staff and t.staff_reason == "uniform" and n >= MODEL_MIN_SAMPLES and mean <= MODEL_CUSTOMER_PROB:
                     t.is_staff = False
                     t.staff_reason = ""
+                    t.model_demotions += 1
                     self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff, counted as customer")
             return
         if not self.staff_cfg.uniforms:

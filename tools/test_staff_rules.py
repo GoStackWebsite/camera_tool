@@ -1,0 +1,146 @@
+"""Rule tests for staff detection (no camera, no trained model needed): python tools/test_staff_rules.py
+
+A fake uniform model returns the probability the scenario dictates, so the tests exercise the decision rules of
+app/analytics.py alone: staff zones as sustained, lapsing evidence, and the uniform model's flip-flop damping."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from app import analytics as A                       # noqa: E402
+from app.config import CameraConfig, StaffConfig, Thresholds, ZoneConfig   # noqa: E402
+from app.detector import PERSON_CLASS, Detection    # noqa: E402
+
+W, H = 1280, 720
+FRAME = np.full((H, W, 3), 90, np.uint8)
+STAFF_ZONE = [[0.70, 0.30], [1.0, 0.30], [1.0, 0.95], [0.70, 0.95]]
+IN_ZONE, ON_FLOOR = (0.85, 0.80), (0.35, 0.80)       # foot points
+
+
+class FakeModel:
+    """Stands in for staffcls.StaffClassifier; `prob` maps a track's box centre to P(staff)."""
+
+    def __init__(self):
+        self.by_x: dict[int, float] = {}
+
+    def staff_prob(self, frame, bbox):
+        return self.by_x.get(bbox[0])
+
+    def info(self):
+        return {"loaded": True}
+
+
+def make(with_model: bool = True):
+    cam = CameraConfig(id="t", name="test", url="", zones=[ZoneConfig("Counter staff side", STAFF_ZONE, "staff")])
+    model = FakeModel() if with_model else None
+    return A.Analytics(cam, Thresholds(), None, None, StaffConfig(), model, None), model
+
+
+def det(track_id: int, foot: tuple[float, float]) -> Detection:
+    cx, y2 = int(foot[0] * W), int(foot[1] * H)
+    return Detection(track_id, PERSON_CLASS, cx - 40, y2 - 300, cx + 40, y2, 0.9)
+
+
+def run(an, model, track_id: int, foot, seconds: float, prob: float | None, t0: float, step: float = 0.25) -> float:
+    """Keep one person at `foot` for `seconds`; the fake model answers `prob` for them. Returns the end time."""
+    t = t0
+    end = t0 + seconds
+    while t < end:
+        d = det(track_id, foot)
+        if model is not None:
+            model.by_x[d.x1] = prob
+        an.update([d], W, H, t, None, FRAME)
+        t += step
+    return t
+
+
+CHECKS: list[tuple[str, bool, str]] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    CHECKS.append((name, bool(ok), detail))
+    print(("PASS  " if ok else "FAIL  ") + name + (f"  [{detail}]" if detail else ""))
+
+
+def state(an, track_id: int) -> str:
+    t = an.tracks[track_id]
+    return f"staff={t.is_staff} reason={t.staff_reason!r} bank={t.staff_zone_time:.0f}s"
+
+
+def main() -> int:
+    zs = Thresholds().staff_zone_seconds
+
+    # 1. the customer in the screenshots: stands in the staff zone, then walks to the shop floor
+    an, m = make()
+    t = run(an, m, 1, IN_ZONE, zs + 5, 0.55, 1000.0)
+    check("someone who stays in a staff zone is staff while there", an.tracks[1].is_staff and an.tracks[1].staff_reason == "staff zone", state(an, 1))
+    t = run(an, m, 1, ON_FLOOR, A.STAFF_ZONE_AWAY_SECONDS - 10, 0.55, t)
+    check("still staff shortly after stepping out (fetching something)", an.tracks[1].is_staff, state(an, 1))
+    t = run(an, m, 1, ON_FLOOR, 20, 0.55, t)
+    check("a customer who stood in the staff zone is a customer again once back on the floor", not an.tracks[1].is_staff, state(an, 1))
+
+    # 2. real staff in uniform: zone first, clothing confirms, stays staff on the floor
+    an, m = make()
+    t = run(an, m, 2, IN_ZONE, zs + 5, 0.97, 1000.0)
+    check("uniformed staff in the zone are confirmed by clothing", an.tracks[2].is_staff and an.tracks[2].staff_reason == "uniform", state(an, 2))
+    t = run(an, m, 2, ON_FLOOR, 300, 0.97, t)
+    check("uniformed staff stay staff after five minutes on the shop floor", an.tracks[2].is_staff, state(an, 2))
+
+    # 3. zone edge: a seated customer whose box drifts into the zone a few seconds per minute never adds up
+    an, m = make()
+    t = 1000.0
+    for _ in range(30):                                  # 30 minutes
+        t = run(an, m, 3, IN_ZONE, 4, 0.60, t)
+        t = run(an, m, 3, ON_FLOOR, 56, 0.60, t)
+    check("brushing the zone edge for 30 minutes does not make a customer staff", not an.tracks[3].is_staff, state(an, 3))
+
+    # 4. no clothing evidence at all (box too small / hidden): the zone decides, and it is not taken back blindly
+    an, m = make()
+    t = run(an, m, 4, IN_ZONE, zs + 5, None, 1000.0)
+    check("with no clothing evidence a staff zone still identifies staff", an.tracks[4].is_staff, state(an, 4))
+    t = run(an, m, 4, ON_FLOOR, 120, None, t)
+    check("... and is not revoked while the model has not seen the person", an.tracks[4].is_staff, state(an, 4))
+
+    # 5. out of uniform (owner in a shirt): the zone needs MODEL_ZONE_PATIENCE x longer, then holds while they are there
+    an, m = make()
+    t = run(an, m, 5, IN_ZONE, zs * 3, 0.05, 1000.0)
+    check("someone clearly not in uniform is not staff after a short stay in the zone", not an.tracks[5].is_staff, state(an, 5))
+    t = run(an, m, 5, IN_ZONE, zs * A.MODEL_ZONE_PATIENCE, 0.05, t)
+    check("... but is after a long, sustained stay", an.tracks[5].is_staff, state(an, 5))
+    t = run(an, m, 5, ON_FLOOR, 60, 0.05, t)
+    t = run(an, m, 5, IN_ZONE, 5, 0.05, t)
+    check("... and is staff again at once when back behind the counter", an.tracks[5].is_staff, state(an, 5))
+
+    # 6. without a learned model the old behaviour is kept: zone staff stay staff on the floor
+    an, m = make(with_model=False)
+    t = run(an, None, 6, IN_ZONE, zs + 5, None, 1000.0)
+    t = run(an, None, 6, ON_FLOOR, 300, None, t)
+    check("no learned model installed: zone staff are kept (nothing else could re-identify them)", an.tracks[6].is_staff, state(an, 6))
+
+    # 7. dark-clothed customer on the floor: the model wavers; after it took "staff" back, it needs far more
+    an, m = make()
+    t = run(an, m, 7, ON_FLOOR, 12, 0.95, 1000.0)
+    first = an.tracks[7].is_staff
+    t = run(an, m, 7, ON_FLOOR, 8, 0.10, t)
+    demoted = not an.tracks[7].is_staff and an.tracks[7].model_demotions == 1
+    t = run(an, m, 7, ON_FLOOR, 6, 0.86, t)              # the run that used to re-promote
+    check("model flip-flop: a short good-looking run no longer re-promotes after a demotion", first and demoted and not an.tracks[7].is_staff,
+          f"first={first} demoted={demoted} " + state(an, 7))
+    t = run(an, m, 7, ON_FLOOR, 15, 0.97, t)
+    check("... a full, clear window still does (real staff are not locked out)", an.tracks[7].is_staff, state(an, 7))
+    t = run(an, m, 7, ON_FLOOR, 8, 0.10, t)
+    t = run(an, m, 7, ON_FLOOR, 30, 0.99, t)
+    check("... and after two demotions clothing alone no longer makes them staff", not an.tracks[7].is_staff and an.tracks[7].model_demotions == 2, state(an, 7))
+
+    failed = [c for c in CHECKS if not c[1]]
+    print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

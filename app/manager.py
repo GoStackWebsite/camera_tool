@@ -253,26 +253,27 @@ class Manager:
             self._stop.wait(5.0)
 
     def _tick_staff_model(self) -> None:
-        """Load models/staff_cls.pt when it appears or changes (after tools/staff_train.py), without a restart.
-        Every camera gets its own instance: the predictor is not thread-safe."""
-        path = MODELS_DIR / "staff_cls.pt"
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            return
-        if time.time() - mtime < 10:                 # still being written by the trainer
-            return
-        with self.lock:
-            runtimes = list(self.runtimes.values())
-        for rt in runtimes:
-            cur = rt.analytics.staff_model
-            if cur is not None and cur.mtime == mtime:
+        """Load models/staff_cls.pt and models/brand_cls.pt when they appear or change (after tools/staff_train.py
+        or tools/brand_train.py), without a restart. Every camera gets its own instance: the predictor is not
+        thread-safe."""
+        for name, cls, attr in (("staff_cls.pt", StaffClassifier, "staff_model"), ("brand_cls.pt", BrandClassifier, "brand_model")):
+            try:
+                mtime = os.path.getmtime(MODELS_DIR / name)
+            except OSError:
                 continue
-            new = StaffClassifier.create(MODELS_DIR)
-            if new is None:
-                return
-            rt.analytics.set_staff_model(new)
-            log.info("camera %s: staff model %s", rt.cfg.id, "reloaded (file changed)" if cur is not None else "loaded")
+            if time.time() - mtime < 10:             # still being written by the trainer
+                continue
+            with self.lock:
+                runtimes = list(self.runtimes.values())
+            for rt in runtimes:
+                cur = getattr(rt.analytics, attr)
+                if cur is not None and cur.mtime == mtime:
+                    continue
+                new = cls.create(MODELS_DIR)
+                if new is None:
+                    break
+                getattr(rt.analytics, "set_" + attr)(new)
+                log.info("camera %s: %s %s", rt.cfg.id, attr.replace("_", " "), "reloaded (file changed)" if cur is not None else "loaded")
 
     def _tick_health(self) -> None:
         now = time.time()

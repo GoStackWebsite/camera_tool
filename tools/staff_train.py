@@ -72,24 +72,24 @@ def build(labels_csv: Path, frames_dir: Path, val_every: int = 5, seed: int = 7)
     print(f"dataset built: {n['train']} train, {n['val']} val crops in {DATA}")
 
 
-def train(epochs: int, imgsz: int) -> None:
+def train(epochs: int, imgsz: int, out: Path = MODEL) -> None:
     from ultralytics import YOLO
     model = YOLO("yolo11n-cls.pt")
-    # workers=2: the default starts one loader process per CPU core (about 640 MB each, 10 GB on this PC), which
-    # exhausted the machine's memory and killed the running camera engine three times on 2026-10-12
+    # workers=2: the default starts one loader process per CPU core (about 640 MB each); two keep a retrain on the
+    # store PC from competing with the running camera engine for memory
     res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, workers=2, fliplr=0.5, degrees=5, scale=0.3,
                       hsv_h=0.01, hsv_s=0.4, hsv_v=0.4, erasing=0.2, project=str(ROOT / "runs"), name="staff_cls", exist_ok=True,
                       verbose=False, plots=False)
     best = Path(res.save_dir) / "weights" / "best.pt"
-    MODEL.parent.mkdir(exist_ok=True)
-    shutil.copy(best, MODEL)
-    print(f"model saved: {MODEL}")
-    evaluate()
+    out.parent.mkdir(exist_ok=True)
+    shutil.copy(best, out)
+    print(f"model saved: {out}")
+    evaluate(out)
 
 
-def evaluate() -> dict:
+def evaluate(path: Path = MODEL) -> dict:
     from ultralytics import YOLO
-    model = YOLO(str(MODEL))
+    model = YOLO(str(path))
     names = model.names
     stats = {}
     for label in ("staff", "customer"):
@@ -118,13 +118,16 @@ if __name__ == "__main__":
     ap.add_argument("--eval", action="store_true")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--imgsz", type=int, default=128)
+    ap.add_argument("--out", metavar="FILE", help="train: write the model here instead of models/staff_cls.pt (the engine "
+                    "hot-loads that file, so train a candidate first and copy it over once it has been checked)")
+    ap.add_argument("--model", metavar="FILE", help="eval: the model to evaluate (default models/staff_cls.pt)")
     a = ap.parse_args()
     if a.build:
         build(Path(a.build), Path(a.frames or "."))
     if a.train:
-        train(a.epochs, a.imgsz)
+        train(a.epochs, a.imgsz, Path(a.out) if a.out else MODEL)
     if a.eval and not a.train:
-        evaluate()
+        evaluate(Path(a.model) if a.model else MODEL)
     if not (a.build or a.train or a.eval):
         ap.print_help()
         sys.exit(1)

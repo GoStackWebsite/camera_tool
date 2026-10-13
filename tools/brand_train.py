@@ -56,22 +56,22 @@ def build(sets: list[tuple[Path, Path]], val_every: int = 5, seed: int = 7) -> N
     print("dataset:", dict(sorted(n.items())))
 
 
-def train(epochs: int, imgsz: int = 128) -> None:
+def train(epochs: int, imgsz: int = 128, out: Path = MODEL) -> None:
     from ultralytics import YOLO
     model = YOLO("yolo11n-cls.pt")
-    # workers=2: ultralytics otherwise starts one data-loader process per CPU core (~640 MB each), which took the
-    # live engine down with it on the store PC
+    # workers=2: ultralytics otherwise starts one data-loader process per CPU core (~640 MB each); two keep a retrain
+    # on the store PC from competing with the running camera engine for memory
     res = model.train(data=str(DATA), epochs=epochs, imgsz=imgsz, batch=32, workers=2, fliplr=0.5, degrees=5, scale=0.3, hsv_h=0.0,
                       hsv_s=0.3, hsv_v=0.4, erasing=0.2, project=str(ROOT / "runs"), name="brand_cls", exist_ok=True, verbose=False, plots=False)
-    MODEL.parent.mkdir(exist_ok=True)
-    shutil.copy(Path(res.save_dir) / "weights" / "best.pt", MODEL)
-    print("model saved:", MODEL)
-    evaluate()
+    out.parent.mkdir(exist_ok=True)
+    shutil.copy(Path(res.save_dir) / "weights" / "best.pt", out)
+    print("model saved:", out)
+    evaluate(out)
 
 
-def evaluate() -> dict:
+def evaluate(path: Path = MODEL) -> dict:
     from ultralytics import YOLO
-    model = YOLO(str(MODEL))
+    model = YOLO(str(path))
     names = {int(k): str(v) for k, v in model.names.items()}
     labels = sorted(p.name for p in (DATA / "val").iterdir() if p.is_dir())
     conf = {a: {b: 0 for b in labels} for a in labels}
@@ -102,6 +102,8 @@ if __name__ == "__main__":
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--eval", action="store_true")
     ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--out", metavar="FILE", help="train: write the model here instead of models/brand_cls.pt")
+    ap.add_argument("--model", metavar="FILE", help="eval: the model to evaluate (default models/brand_cls.pt)")
     a = ap.parse_args()
     if a.build:
         sets = [(Path(a.build), Path(a.frames or "."))]
@@ -109,6 +111,6 @@ if __name__ == "__main__":
             sets.append((Path(a.labels2), Path(a.frames2 or a.frames or ".")))
         build(sets)
     if a.train:
-        train(a.epochs)
+        train(a.epochs, out=Path(a.out) if a.out else MODEL)
     if a.eval and not a.train:
-        evaluate()
+        evaluate(Path(a.model) if a.model else MODEL)

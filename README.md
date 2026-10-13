@@ -213,14 +213,40 @@ What the training set must contain (learned on 2026-10-12, when a model trained 
 - only clear cases. A plain dark top that might be the uniform is left out, not guessed;
 - a validation split by time (the last part of each day), so the score is measured on people it has not seen.
 
-`datasets\staff_labels_2026-10-12.csv` (1218 boxes over three days) is the current label file; the frames are the
+- **look-alikes of the uniform**: on the evening of 2026-10-12 a visitor in a black hoodie with an ID lanyard, and
+  women in black tops, were read as staff until about 60 crops of them were added as `customer`.
+
+`datasets\staff_labels_2026-10-12.csv` (about 1500 boxes over four days) is the current label file; the frames are the
 snapshots the engine uploads to Congruence Eye (`App_Data\uploads\snapshots\<store>\<day>`, faces blurred). The
 classifier never sees faces: the head band of every crop is pixelated, in training and live.
 
-A staff zone still promotes anyone standing in it, but when the model clearly sees no uniform it waits 30 times
-longer (10 minutes instead of 20 s): a customer leaning on a counter has hidden feet, so their position falls on
-the counter top, inside a staff zone drawn over it. Draw staff zones on the floor behind the counter, not over
-the counter.
+Retrain without touching the live model, compare, then install (the engine hot-loads both model files):
+
+```
+.venv\Scripts\python tools\staff_train.py --build datasets\staff_labels_2026-10-12.csv --frames <snapshots>\<store>
+.venv\Scripts\python tools\staff_train.py --train --out models\staff_cls.candidate.pt
+.venv\Scripts\python tools\staff_compare.py models\staff_cls.pt models\staff_cls.candidate.pt
+copy models\staff_cls.candidate.pt models\staff_cls.pt
+```
+
+### Staff zones: where someone stands, not who they are
+
+A staff zone is position evidence only, so these rules keep customers from turning into staff
+(`tools\test_staff_rules.py` covers them):
+
+- the presence must be **sustained**: 20 s in the zone, and time outside drains what was collected, so brushing a
+  zone edge never adds up. When the model clearly sees no uniform it takes 30 times longer (10 minutes);
+- staff by zone alone **lapses**: 45 s after leaving every staff zone the person is a customer again, unless the
+  uniform model has confirmed them in the meantime (then they stay staff anywhere in the shop);
+- the uniform model may change its mind about a person twice; after that their clothing is treated as ambiguous
+  and only a zone or a manual tag makes them staff.
+
+Draw staff zones on the **floor where staff stand**, never over a counter or desk top: a customer leaning on a
+counter or paying at a desk has hidden feet, so their position lands on the furniture. On 2026-10-12 both staff
+zones of the shop floor camera covered such spots (44 of the 163 positions inside them that evening were in
+customer areas); they were redrawn to the passage behind the counter and the seat behind the billing desk.
+`tools\live_tracks.py` prints, for every person on screen, why they are staff (`staff_reason`, model score, seconds
+banked in a staff zone).
 
 ## Tests and tooling
 
