@@ -260,6 +260,39 @@ customer areas); they were redrawn to the passage behind the counter and the sea
 `tools\live_tracks.py` prints, for every person on screen, why they are staff (`staff_reason`, model score, seconds
 banked in a staff zone).
 
+### How fast people are identified, and when an entry is booked
+
+- A person who comes into view is **identifying** (grey box) until staff or customer is decided: clothing is
+  sampled every 0.15 s, and five clean, very sure samples are enough. With a clear view that is about one
+  second; a less clear view takes three; with no usable view at all the person counts as a visitor after 6 s.
+  People who are still being identified are not in the customer count.
+- People enter under the camera, where no clothing can be seen. So an IN crossing is **held** until the person
+  is identified (6 s at most) and then booked as a customer walk-in or as staff, with the time of the crossing.
+  Staff walking back in do not raise the walk-in count; `staff_entries` / `staff_exits` count them separately.
+- When the tracker gives a person a new number (it lost them for a moment), the new track takes over the
+  verdict, the votes behind it, a manual tag and gender / age from the track that was lost at that spot.
+  Not at the frame border, where one person leaving and another arriving look the same.
+
+### One store, several cameras (store fusion)
+
+Cameras of one store that see the same floor are told so in `data\fusion.json` (example:
+`docs\fusion.example.json`): `primary` is the overview camera, whose track numbers and counts are the store's,
+and each *shared region* is the same piece of floor drawn once per camera (normalised frame coordinates).
+
+A person standing in a shared region on a second camera is linked to the person standing in that region on the
+overview camera (the pairing has to hold for a second; with several people the pairs are made by clothing
+colour, and one person on each side is still not linked when their clothing is clearly different). While linked:
+
+- the person has **one id**: the overview camera's number on both screens and as Congruence Eye `visitorId`;
+- there is **one verdict**: the clothing scores of both views are pooled (a polo that looks like the uniform
+  from behind is seen from the front by the other camera), and a staff zone or a manual tag on either camera
+  counts on both;
+- the person is **counted once** in the store totals, and has one visit, which includes the zones of the
+  second camera (the queue at the billing desk becomes part of the customer's journey).
+
+People only a second camera can see keep that camera's number with a letter (`B-7`), so a bare number always
+means the overview camera's person. `GET /api/stats` lists the live links under `fusion`.
+
 ## Tests and tooling
 
 - `tools\e2e_test.py` replays a recorded day of real visits into an isolated Congruence Eye test store and checks

@@ -25,6 +25,9 @@ from pathlib import Path
 log = logging.getLogger("fusion")
 
 LINK_GRACE = 2.0          # seconds a link survives after one side has left the shared region
+LINK_CONFIRM = 1.0        # a pairing must be the answer this long before it becomes a link (a foot point that strays
+                          # into a region for a moment must not marry two different people)
+VETO_COLOUR_COST = 0.6    # one person here on each camera, but their clothing is this different: not the same person
 MAX_COLOUR_COST = 0.45    # several candidates: clothing colours further apart than this are not the same person
 EDGE = 0.002              # foot points are pulled this far inside the frame before a region test
 
@@ -63,7 +66,7 @@ class StoreFusion:
         self.primary = ""
         self.regions: list[dict] = []       # {"name": str, "views": {camera id: polygon}}
         self.links: dict[tuple, dict] = {}  # (camera id, track id) -> {"pid", "region", "since", "last"}
-        self._primary_view: list[dict] = []
+        self._pending: dict[tuple, tuple] = {}   # (camera id, track id) -> (overview track id, proposed since)
         self._lock = threading.Lock()
         self.error = ""
         self.reload()
@@ -92,6 +95,7 @@ class StoreFusion:
         with self._lock:
             self.primary, self.regions, self.error = primary, regions, error
             self.links.clear()
+            self._pending.clear()
         if regions:
             log.info("store fusion: overview camera %s, shared regions: %s", primary, ", ".join(r["name"] for r in regions))
 
@@ -118,8 +122,9 @@ class StoreFusion:
         """Pair the people of the second camera (D) with those of the overview camera (P) in one region."""
         if not D or not P:
             return []
-        if len(D) == 1 and len(P) == 1:
-            return [(D[0], P[0])]                     # one person here on each camera: the same person
+        if len(D) == 1 and len(P) == 1:               # one person here on each camera: the same person,
+            c = colour_cost(D[0].get("torso"), P[0].get("torso"))
+            return [] if c is not None and c > VETO_COLOUR_COST else [(D[0], P[0])]      # unless dressed quite differently
         cand = []
         for d in D:
             for p in P:
@@ -135,25 +140,6 @@ class StoreFusion:
             out.append((d, p))
         return out
 
-    def quick_link(self, cam: str, track_id: int, foot) -> tuple[int, str] | None:
-        """A track that has just appeared on a second camera: if exactly one free person stands in the same shared
-        region on the overview camera, that is who it is (so that even its first events carry the store id).
-        Called from inside that camera's analytics; touches only this object's own state."""
-        with self._lock:
-            if not self.active or cam == self.primary:
-                return None
-            region = self._region_of(cam, foot)
-            if region is None:
-                return None
-            taken = {l["pid"] for k, l in self.links.items() if k[0] == cam}
-            here = sum(1 for k, l in self.links.items() if k[0] == cam and l["region"] == region)
-            free = [p for p in self._primary_view if p["id"] not in taken and self._region_of(self.primary, p["foot"]) == region]
-            if len(free) != 1 or here:
-                return None
-            now = free[0]["ts"]
-            self.links[(cam, track_id)] = {"pid": free[0]["id"], "region": region, "since": now, "last": now}
-            return free[0]["id"], self.primary
-
     def tick(self, analytics: dict, now: float) -> None:
         """Re-evaluate the links and hand every camera what the other view knows. `analytics`: camera id -> Analytics."""
         self.reload()
@@ -165,7 +151,7 @@ class StoreFusion:
         prim = {v["id"]: v for v in views[self.primary]}
         per_cam: dict[str, dict] = {cam: {} for cam in analytics}
         with self._lock:
-            self._primary_view = [{**v, "ts": now} for v in views[self.primary]]
+            proposed: dict[tuple, int] = {}
             for cam, vs in views.items():
                 if cam == self.primary:
                     continue
@@ -187,8 +173,15 @@ class StoreFusion:
                     D = [d for d in vs if (cam, d["id"]) not in self.links and self._region_of(cam, d["foot"]) == r["name"]]
                     P = [p for p in views[self.primary] if p["id"] not in taken and self._region_of(self.primary, p["foot"]) == r["name"]]
                     for d, p in self._assign(D, P):
-                        self.links[(cam, d["id"])] = {"pid": p["id"], "region": r["name"], "since": now, "last": now}
-                        taken.add(p["id"])
+                        key = (cam, d["id"])
+                        proposed[key] = p["id"]
+                        pid, since = self._pending.get(key, (None, now))
+                        if pid != p["id"]:
+                            self._pending[key] = (p["id"], now)          # a new answer: the clock starts again
+                        elif now - since >= LINK_CONFIRM:
+                            self.links[key] = {"pid": p["id"], "region": r["name"], "since": now, "last": now}
+                            taken.add(p["id"])
+            self._pending = {k: v for k, v in self._pending.items() if proposed.get(k) == v[0] and k not in self.links}
             for (cam, tid), l in self.links.items():
                 d = next((v for v in views.get(cam, []) if v["id"] == tid), None)
                 p = prim.get(l["pid"])

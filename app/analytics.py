@@ -399,11 +399,6 @@ class Analytics:
                     dt = 0.0
                     t.judged = self.staff_model is None        # nothing to wait for without a learned model
                     self._inherit_identity(t, now, fx, fy, ids_now)
-                    if self.fusion is not None:
-                        link = self.fusion.quick_link(self.cam.id, t.id, (fx, fy))
-                        if link is not None:
-                            t.store_id, t.store_cam = link
-                            t.duplicate = True
                 else:
                     _, px, py = t.history[-1]
                     t.path_len += math.hypot((fx - px) * aspect, fy - py)
@@ -421,7 +416,7 @@ class Analytics:
                 if self.cam.passby_line:
                     self._update_passby(t, now, fx, fy)
                 self._update_zones(t, now, fx, fy, dt)
-                if not t.judged and (t.is_staff or now - t.first_seen >= JUDGE_MAX_SECONDS):
+                if not t.judged and (t.is_staff or (now - t.first_seen >= JUDGE_MAX_SECONDS and not self._zone_pending(t))):
                     t.judged = True
                 if t.pending_entry is not None:
                     self._settle_entry(t, now)
@@ -992,6 +987,12 @@ class Analytics:
             t.staff_reason = ""
             t.brand = None
             self._event(now, "staff", t.id, f"Person #{t.id} left the staff zone and is not in uniform, counted as customer")
+
+    def _zone_pending(self, t: Track) -> bool:
+        """Standing in a staff zone that has not made up its mind yet (it takes staff_zone_seconds): such a person is
+        still being identified, not a visitor for a few seconds in between."""
+        return (t.staff_zone_out == 0.0 and 0.0 < t.staff_zone_time < self.thr.staff_zone_seconds
+                and t.manual_staff is None and not self._clearly_not_uniform(t))
 
     def _clearly_not_uniform(self, t: Track) -> bool:
         """The learned model has seen enough of this person and their clothing is not the uniform."""

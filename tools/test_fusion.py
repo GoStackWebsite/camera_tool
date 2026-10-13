@@ -193,7 +193,17 @@ def main() -> int:
     # 10. no configuration: nothing changes
     with tempfile.TemporaryDirectory() as d:
         f = StoreFusion(Path(d) / "fusion.json")
-        check("no fusion.json: fusion is off", not f.active and f.quick_link("B", 1, B_FRONT) is None)
+        check("no fusion.json: fusion is off", not f.active and not f.status()["regions"])
+
+    # 11. a foot point that strays into a shared region for a moment does not marry two different people
+    s = Shop()
+    s.run(3.0, {"A": [(70, A_SEAT, None, None, 120)], "B": [(99, B_FRONT, 0.03, None, 300)]})         # cashier seated; customer only on B
+    s.run(0.5, {"A": [(70, (0.30, 0.95), None, None, 120)], "B": [(99, B_FRONT, 0.03, None, 300)]})   # the cashier leans over for half a second
+    s.run(3.0, {"A": [(70, A_SEAT, None, None, 120)], "B": [(99, B_FRONT, 0.03, None, 300)]})
+    check("half a second in the region is not a link", s.track("B", 99).store_id is None and not s.fusion.links, f"links={s.fusion.links}")
+    s = Shop()
+    s.run(4.0, {"A": [(71, A_FRONT, 0.03, WHITE, 300)], "B": [(100, B_FRONT, 0.03, (20, 20, 20), 300)]})
+    check("one person each, but white against black clothing: not linked", s.track("B", 100).store_id is None, f"store_id={s.track('B', 100).store_id}")
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")

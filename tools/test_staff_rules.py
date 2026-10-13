@@ -300,6 +300,15 @@ def main() -> int:
     an.update([d], W, H, t, None, FRAME)
     check("at the door nothing carries over: the next person in is not the one who just left", not an.tracks[77].is_staff and not an.tracks[77].judged, state(an, 77))
 
+    # 15. someone waiting for a staff zone's verdict is "identifying" all the way, never a visitor in between
+    an, m = make()
+    t = run(an, m, 80, IN_ZONE, 10.0, None, 1000.0, step=0.1, height=150)
+    snap = an.snapshot(t)
+    mid = (snap["occupancy"], snap["identifying"], an.tracks[80].is_staff)
+    t = run(an, m, 80, IN_ZONE, zs, None, t, step=0.1, height=150)
+    check("in a staff zone, no clothing visible: 'identifying' until the zone decides, then staff", mid == (0, 1, False) and an.tracks[80].is_staff,
+          f"after 10 s (customers, identifying, staff)={mid}, then " + state(an, 80))
+
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
     return 1 if failed else 0
