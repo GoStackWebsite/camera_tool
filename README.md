@@ -239,7 +239,19 @@ A staff zone is position evidence only, so these rules keep customers from turni
 - staff by zone alone **lapses**: 45 s after leaving every staff zone the person is a customer again, unless the
   uniform model has confirmed them in the meantime (then they stay staff anywhere in the shop);
 - the uniform model may change its mind about a person twice; after that their clothing is treated as ambiguous
-  and only a zone or a manual tag makes them staff.
+  and only a zone or a manual tag makes them staff;
+- someone who is lost and found again at the same spot inside a staff zone (a seated cashier of whom the camera
+  sees only the head) keeps the zone time and staff status of the lost track instead of starting as a visitor.
+
+The clothing score itself is the **average of two separately trained models** (the staff model and the brand
+model's "not a customer"): either one alone calls some dark-clothed customers staff, rarely the same ones
+(`tools\ensemble_eval.py` prints the scores per capture day). Crops that show no clothing are not scored at
+all: a short box cut off by the frame bottom, or one covered by another person.
+
+Known limit: the classifiers see 128 px crops cut from 1280 px snapshots, where a plain black top and the black
+uniform polo differ by a few pixels of piping. A customer in a plain black top can still be read as staff until
+crops of that person are in the label set (`tools\staff_events.py 17:30` lists every staff decision since a
+time of day, to find such cases quickly).
 
 Draw staff zones on the **floor where staff stand**, never over a counter or desk top: a customer leaning on a
 counter or paying at a desk has hidden feet, so their position lands on the furniture. On 2026-10-12 both staff
