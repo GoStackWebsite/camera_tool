@@ -25,7 +25,7 @@ from app.config import CameraConfig, ConfigStore, Thresholds, ZoneConfig   # noq
 from app.congruence import fetch_config                          # noqa: E402
 from app.manager import Manager                                  # noqa: E402
 from app.store import Store                                      # noqa: E402
-from app.sync import Reconciler, frame_to_stage, stage_to_frame  # noqa: E402
+from app.sync import Reconciler, frame_to_stage, orient_line, stage_to_frame  # noqa: E402
 
 RESULTS: list[tuple[bool, str]] = []
 
@@ -98,7 +98,30 @@ with tempfile.TemporaryDirectory() as d:
     check(cs.config.congruence.zones == {"cam1/Front desk": 22}, "a hand-made Congruence Eye mapping follows the new name")
     r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "delete", "zone": "Shelf"}])
     check(r["applied"] == 1 and "Shelf" not in {z.name for z in cs.config.camera("cam1").zones}, "zone removed")
+    # count line: add, move, unchanged, refused, removed
+    walker = SimpleNamespace(zones={}, zone_seq=[], pending_side=1, pending_n=1, history=[(1.0, 0.5, 0.3)], side=1, side_pt=(0.5, 0.9))
+    an.tracks[8] = walker
+    door = [[0.3, 0.5], [0.7, 0.52]]
+    r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "line", "points": door}])
+    check(r["applied"] == 1 and cs.config.camera("cam1").line == door and an.cam.line == door, "count line added and live in the analytics")
+    check(walker.side == -1 and walker.pending_side == 0, "a person above the new line is on its OUT side straight away (no phantom crossing)")
+    r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "line", "points": [[0.3, 0.5], [0.7, 0.52]]}])
+    check(r["applied"] == 0 and not r["errors"], "saving the same line again changes nothing")
+    r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "line", "points": [[0.3, 0.5], [0.305, 0.5]]}, {"op": "line"}])
+    check(r["applied"] == 0 and len(r["errors"]) == 2 and r["errors"][0]["zone"] == "count line", "a too-short line and a line without ends are refused")
+    r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "line", "points": [door[1], door[0]]}])
+    check(r["applied"] == 1 and cs.config.camera("cam1").line == [door[1], door[0]], "Swap IN/OUT reverses the line")
+    r = zone_edit.apply_local(cs, mgr, "cam1", [{"op": "line", "remove": True}])
+    check(r["applied"] == 1 and cs.config.camera("cam1").line is None, "count line removed")
     store.close()
+
+# ---------------------------------------------------------------- IN side -> Congruence Eye inDirection
+print("count line direction")
+for line, want in (([[0.1, 0.5], [0.9, 0.5]], "DOWN"), ([[0.9, 0.5], [0.1, 0.5]], "UP"), ([[0.5, 0.1], [0.5, 0.9]], "LEFT"),
+                   ([[0.5, 0.9], [0.5, 0.1]], "RIGHT"), ([[0.665, 0.405], [0.785, 0.425]], "DOWN"), ([[0.2, 0.2], [0.6, 0.9]], "LEFT")):
+    got = zone_edit.in_direction(line)
+    back = orient_line(line, got)
+    check(got == want and back == line, f"{line} -> IN {want}, and the server's rule gives the same line back")
 
 # ---------------------------------------------------------------- managed camera against a look-alike server
 print("managed camera (look-alike Congruence Eye)")
@@ -233,6 +256,33 @@ with tempfile.TemporaryDirectory() as d:
     n = len(CALLS)
     r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "update", "zone": "Trial room", "name": "Trial room"}], "tok-admin")
     check(r["applied"] == 0 and len(CALLS) == n, "saving without changes writes nothing")
+
+    # count line on the server (camera is 4:3, so editor and frame coordinates differ)
+    cam = cs.config.camera("ce3")
+    r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "line", "points": [list(p) for p in cam.line]}], "tok-admin")
+    check(r["applied"] == 0 and len(CALLS) == n, "an untouched count line is not re-sent")
+    door = [[0.2, 0.4], [0.8, 0.45]]                        # IN = down, the opposite of the server's UP line
+    check(raises(401, zone_edit.apply_managed, cs, connector, rec, "ce3", [{"op": "line", "points": door}], ""), "moving the line needs a sign-in")
+    r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "line", "points": door}], "tok-admin")
+    patch = CALLS[-1]
+    check(r["applied"] == 1 and patch[0] == "PATCH" and patch[1] == "/api/zones/12" and set(patch[2]) == {"polygon", "inDirection"},
+          "the line is PATCHed on its ENTRY_LINE zone (shape and IN side only)")
+    check(patch[2]["inDirection"] == "DOWN" and patch[2]["polygon"] == [frame_to_stage(p, 1280, 960) for p in door],
+          "it reaches the server in 16:9 editor coordinates with IN = DOWN")
+    cam = cs.config.camera("ce3")
+    check(zone_edit.same_points(cam.line, door) and cam.remote_line["in_direction"] == "DOWN", "after the sync back the camera counts on the line as dragged")
+    r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "line", "points": [door[1], door[0]]}], "tok-admin")
+    cam = cs.config.camera("ce3")
+    check(r["applied"] == 1 and CALLS[-1][2]["inDirection"] == "UP" and zone_edit.same_points(cam.line, [door[1], door[0]]), "Swap IN/OUT turns the server's inDirection round")
+    r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "line", "remove": True}], "tok-admin")
+    cam = cs.config.camera("ce3")
+    check(r["applied"] == 1 and ZONES[12]["isActive"] is False and cam.line is None, "removing the line marks its zone inactive, the camera has no line")
+    r = zone_edit.apply_managed(cs, connector, rec, "ce3", [{"op": "line", "points": door}], "tok-admin")
+    post = CALLS[-1]
+    cam = cs.config.camera("ce3")
+    check(r["applied"] == 1 and post[0] == "POST" and post[2]["type"] == "ENTRY_LINE" and post[2]["cameraId"] == 3 and post[2]["inDirection"] == "DOWN"
+          and not post[2]["name"].lower().startswith("pass"), "a camera without a line gets a new ENTRY_LINE (not a pass-by line)")
+    check(zone_edit.same_points(cam.line, door) and cam.remote_line["zone_id"] == max(ZONES), "the new line is live and linked to its server zone")
     store.close()
 
 srv.shutdown()

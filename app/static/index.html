@@ -142,12 +142,13 @@
             <a id="btnSnap" href="#" target="_blank"><button>Snapshot</button></a>
             <span class="sep"></span>
             <button id="btnLine">Draw count line</button><button id="btnSwap">Swap IN/OUT</button>
-            <button id="btnZone">Draw zone</button><button id="btnEdit" title="Reshape, rename, change the role of or remove the zones on this camera">Edit zones</button>
+            <button id="btnZone">Draw zone</button><button id="btnEdit" title="Reshape, rename, change the role of or remove the zones on this camera">Edit zones</button><button id="btnEdLine" title="Move the in/out count line and choose which side counts as IN">Edit in/out line</button>
             <input id="zoneName" placeholder="Zone name" style="display:none;width:130px">
             <select id="zoneRole" style="display:none"><option value="display">display / product area</option><option value="entrance">entrance</option><option value="checkout">checkout / counter</option><option value="queue">queue</option><option value="staff">staff area</option></select>
             <button id="btnFinish" style="display:none" class="primary">Finish zone</button><button id="btnCancel" style="display:none">Cancel</button>
             <input id="edName" maxlength="40" placeholder="Zone name" title="Name of the selected zone" style="display:none;width:150px"><select id="edRole" title="Role of the selected zone" style="display:none"></select>
             <button id="btnEdDelPt" style="display:none" title="Remove the highlighted corner (double-clicking a corner does the same)">Remove corner</button><button id="btnEdDelZone" style="display:none" class="danger">Delete zone</button>
+            <button id="btnEdSwap" style="display:none" title="Walking the other way across the line counts as IN">Swap IN/OUT</button><button id="btnEdDelLine" style="display:none" class="danger">Remove line</button><button id="btnEdAddLine" style="display:none" title="Put a count line in the middle of the picture, then drag it to the door">Add count line</button>
             <button id="btnEdSave" style="display:none" class="primary">Save changes</button><button id="btnEdCancel" style="display:none">Cancel</button>
             <span class="sep"></span><button id="btnClearLine">Clear line</button><button id="btnClearZones">Clear zones</button>
           </div>
@@ -540,6 +541,8 @@
   const ROLE_RGB = {display: '0,160,255', entrance: '90,220,90', checkout: '0,230,255', queue: '255,200,0', staff: '160,120,255'};
   const ROLE_LABEL = {display: 'display / product area', entrance: 'entrance', checkout: 'checkout / counter', queue: 'queue', staff: 'staff area'};
   const EDIT_HINT = 'Click a zone to select it. Drag a corner to reshape it, drag inside to move it, click a small dot on an edge to add a corner, double-click a corner to remove it. Rename it or change its role in the boxes above, then press Save changes.';
+  const LINE_HINT = 'Drag the round ends of the count line to place it across the door at floor level (feet are what crosses it), or drag the line itself to move it. The arrow points to the IN side: walking that way counts a walk-in. Swap IN/OUT if it points out of the shop, then press Save changes.';
+  const LINE = 'line', LINE_RGB = '0,220,255', LINE_LABEL = 'count line';   // ed.sel === LINE: the count line is selected
   let ceTok = null, ceUser = null;
   try { ceTok = sessionStorage.getItem('ceTok'); ceUser = JSON.parse(sessionStorage.getItem('ceUser') || 'null'); } catch (e) { ceTok = null; ceUser = null; }
 
@@ -547,8 +550,8 @@
   function ceReady() { return !!(ceTok && ceUser && ceUser.can_edit); }
   function defaultHint() {
     return camCfg().managed
-      ? 'This camera is managed by Congruence Eye. "Edit zones" and "Draw zone" save the zones there (Admin sign-in needed); the count line is changed in Congruence Eye › Admin › Zones.'
-      : 'Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers. "Edit zones" reshapes, renames or removes them.';
+      ? 'This camera is managed by Congruence Eye. "Edit zones", "Draw zone" and "Edit in/out line" save there (Admin sign-in needed).'
+      : 'Draw the count line across the entrance (crossing to the IN side counts a walk-in). Draw zones on the floor where feet are: product areas, the checkout, the queue, and a staff area so staff can be told apart from customers. "Edit zones" reshapes, renames or removes them; "Edit in/out line" moves the line.';
   }
   function setMode(m) { mode = m; $('#btnAnnot').classList.toggle('active', m === 'annotated'); $('#btnRaw').classList.toggle('active', m === 'raw'); setVideo(); }
   function roleOptions(sel, current) {
@@ -561,7 +564,7 @@
     const managed = !!camCfg().managed, editing = !!ed;
     const show = (sel, on) => { const e = $(sel); if (e) e.style.display = on ? '' : 'none'; };
     ['#btnLine', '#btnSwap', '#btnClearLine', '#btnClearZones'].forEach(sel => show(sel, !managed && !editing));
-    show('#btnZone', !editing); show('#btnEdit', !drawMode);
+    show('#btnZone', !editing); show('#btnEdit', !drawMode); show('#btnEdLine', !drawMode && !editing);
   }
 
   // ---- talking to the server
@@ -642,22 +645,32 @@
 
   // ---- editor state
   const zoneDirty = z => z.name.trim().replace(/\s+/g, ' ') !== z.orig || z.role !== z.origRole || z.geo;
-  const dirtyCount = () => ed ? ed.zones.filter(zoneDirty).length + ed.removed.length : 0;
+  const samePts = (a, b) => (!a && !b) || (!!a && !!b && a.length === b.length && a.every((p, i) => Math.abs(p[0] - b[i][0]) < 5e-5 && Math.abs(p[1] - b[i][1]) < 5e-5));
+  const lineDirty = () => !!ed && !samePts(ed.line.pts, ed.line.orig);
+  const dirtyCount = () => ed ? ed.zones.filter(zoneDirty).length + ed.removed.length + (lineDirty() ? 1 : 0) : 0;
   const clamp01 = v => Math.min(1, Math.max(0, v));
-  function startEdit(selName) {
-    if (ed) { if (selName) { ed.sel = ed.zones.findIndex(z => z.orig === selName); ed.vtx = -1; renderEditBar(); drawOverlay(); } return; }
+  const copyPts = pts => pts ? pts.map(p => [clamp01(p[0]), clamp01(p[1])]) : null;
+  // the count line: select it, or put a new one in the middle of the picture (IN = down) when there is none
+  function selectLine() {
+    if (!ed.line.pts) { ed.line.pts = [[0.35, 0.6], [0.65, 0.6]]; toast('Count line added in the middle of the picture: drag its ends to the door.'); }
+    ed.sel = LINE; ed.vtx = -1; renderEditBar(); drawOverlay();
+  }
+  function startEdit(selName, opts = {}) {
+    if (ed) { if (opts.line) selectLine(); else if (selName) { ed.sel = ed.zones.findIndex(z => z.orig === selName); ed.vtx = -1; renderEditBar(); drawOverlay(); } return; }
     if (drawMode) endDraw();
     const c = camCfg();
-    if (!c.zones.length) { toast('There are no zones on this camera yet. Use "Draw zone" first.'); return; }
-    ed = {zones: c.zones.map(z => ({orig: z.name, origRole: z.role, name: z.name, role: z.role, geo: false, points: z.points.map(p => [clamp01(p[0]), clamp01(p[1])])})), removed: [], sel: -1, vtx: -1, drag: null, prevMode: mode};
+    if (!c.zones.length && !c.line && !opts.line) { toast('There are no zones on this camera yet. Use "Draw zone" first.'); return; }
+    ed = {zones: c.zones.map(z => ({orig: z.name, origRole: z.role, name: z.name, role: z.role, geo: false, points: z.points.map(p => [clamp01(p[0]), clamp01(p[1])])})), removed: [], sel: -1, vtx: -1, drag: null, prevMode: mode,
+      line: {pts: copyPts(c.line), orig: copyPts(c.line)}};
     if (selName) ed.sel = ed.zones.findIndex(z => z.orig === selName);
+    if (opts.line) selectLine();
     if (mode !== 'raw') setMode('raw');          // the plain picture under the editable shapes
     overlay.classList.add('editing'); renderTools(); renderEditBar(); checkCeSession(); drawOverlay();
     if (S && S.cameras[detailCam]) renderZoneRows(S.cameras[detailCam]);
   }
   function stopEdit(force) {
     if (!ed) return true;
-    if (!force && dirtyCount() && !confirm('Discard the zone changes that have not been saved?')) return false;
+    if (!force && dirtyCount() && !confirm('Discard the changes that have not been saved?')) return false;
     const prev = ed.prevMode; ed = null; cePending = null;
     overlay.classList.remove('editing'); overlay.style.cursor = '';
     if (prev !== mode && detailCam) setMode(prev);
@@ -669,11 +682,29 @@
     const on = !!ed, z = on && ed.sel >= 0 ? ed.zones[ed.sel] : null;
     ['#btnEdSave', '#btnEdCancel'].forEach(sel => $(sel).style.display = on ? '' : 'none');
     ['#edName', '#edRole', '#btnEdDelPt', '#btnEdDelZone'].forEach(sel => $(sel).style.display = z ? '' : 'none');
+    const lineSel = on && ed.sel === LINE && !!ed.line.pts;
+    ['#btnEdSwap', '#btnEdDelLine'].forEach(sel => $(sel).style.display = lineSel ? '' : 'none');
+    $('#btnEdAddLine').style.display = on && !ed.line.pts ? '' : 'none';
     $('#btnEdit').classList.toggle('active', on);
     if (!on) return;
     if (z) { if (document.activeElement !== $('#edName')) $('#edName').value = z.name; roleOptions($('#edRole'), z.role); $('#btnEdDelPt').disabled = !(ed.vtx >= 0 && z.points.length > 3); }
     const n = dirtyCount(); $('#btnEdSave').textContent = n ? `Save changes (${n})` : 'Save changes'; $('#btnEdSave').disabled = !n;
-    $('#drawHint').textContent = EDIT_HINT;
+    $('#drawHint').textContent = lineSel ? LINE_HINT : EDIT_HINT;
+  }
+  function drawLine(ctx) {
+    const pts = ed.line.pts; if (!pts) return;
+    const sel = ed.sel === LINE, [a, b] = pts.map(p => toPx(p[0], p[1]));
+    ctx.lineCap = 'round'; ctx.lineWidth = sel ? 5 : 3; ctx.strokeStyle = `rgb(${LINE_RGB})`; ctx.setLineDash(sel ? [] : [10, 5]);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.setLineDash([]); ctx.lineCap = 'butt';
+    // an arrow across the middle points to the IN side (the + side of A->B, the engine's rule)
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len, tip = [mx + nx * 26, my + ny * 26];
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(mx - nx * 14, my - ny * 14); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
+    ctx.fillStyle = `rgb(${LINE_RGB})`; ctx.beginPath(); ctx.moveTo(tip[0] + nx * 8, tip[1] + ny * 8); ctx.lineTo(tip[0] - ny * 7, tip[1] + nx * 7); ctx.lineTo(tip[0] + ny * 7, tip[1] - nx * 7); ctx.closePath(); ctx.fill();
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const tag = (txt, x, y) => { const tw = ctx.measureText(txt).width; ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(x - tw / 2 - 5, y - 9, tw + 10, 18); ctx.fillStyle = `rgb(${LINE_RGB})`; ctx.fillText(txt, x, y); };
+    tag('IN' + (lineDirty() ? ' *' : ''), mx + nx * 48, my + ny * 48); tag('OUT', mx - nx * 34, my - ny * 34);
+    [a, b].forEach((p, k) => { const hot = sel && ed.drag && ed.drag.end === k; ctx.beginPath(); ctx.arc(p[0], p[1], hot ? 9 : sel ? 7 : 5, 0, Math.PI * 2); ctx.fillStyle = hot ? '#fff' : `rgb(${LINE_RGB})`; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = hot ? `rgb(${LINE_RGB})` : '#fff'; ctx.stroke(); });
   }
   function drawEditor(ctx) {
     ed.zones.forEach((z, i) => {
@@ -691,6 +722,7 @@
       pts.forEach((p, k) => { const q = pts[(k + 1) % pts.length]; ctx.beginPath(); ctx.arc((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, 4, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke(); });
       pts.forEach((p, k) => { const hot = k === ed.vtx; ctx.beginPath(); ctx.arc(p[0], p[1], hot ? 8 : 6, 0, Math.PI * 2); ctx.fillStyle = hot ? '#fff' : `rgb(${rgb})`; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = hot ? `rgb(${rgb})` : '#fff'; ctx.stroke(); });
     });
+    drawLine(ctx);                                    // on top: it is thin and must stay grabbable over big zones
   }
 
   // ---- pointer work on the picture
@@ -698,15 +730,25 @@
   const evPos = e => { const r = overlay.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   const inPoly = (x, y, pts) => { let c = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
   const polyArea = pts => Math.abs(pts.reduce((a, p, i) => { const q = pts[(i + 1) % pts.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
-  // what is under the pointer: a corner or an edge dot of the selected zone first, then any corner, then the
-  // smallest zone containing the point (so a small zone lying on a big one can still be picked)
+  const segDist = (px, py, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], t = Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / ((dx * dx + dy * dy) || 1))); return Math.hypot(px - a[0] - t * dx, py - a[1] - t * dy); };
+  function lineHit(px, py) {
+    if (!ed.line.pts) return null;
+    const ends = ed.line.pts.map(p => toPx(p[0], p[1]));
+    for (let k = 0; k < 2; k++) if (Math.hypot(ends[k][0] - px, ends[k][1] - py) <= HIT) return {line: true, end: k};
+    return segDist(px, py, ends[0], ends[1]) <= HIT ? {line: true, body: true} : null;
+  }
+  // what is under the pointer: the selected count line, then a corner or an edge dot of the selected zone, then
+  // any corner, then the count line, then the smallest zone containing the point (so a small zone lying on a
+  // big one can still be picked)
   function editHit(px, py) {
+    if (ed.sel === LINE) { const h = lineHit(px, py); if (h) return h; }
     const all = ed.zones.map((_, i) => i), order = ed.sel >= 0 ? [ed.sel].concat(all.filter(i => i !== ed.sel)) : all;
     for (const i of order) {
       const pts = ed.zones[i].points.map(p => toPx(p[0], p[1]));
       for (let k = 0; k < pts.length; k++) if (Math.hypot(pts[k][0] - px, pts[k][1] - py) <= HIT) return {zone: i, vtx: k};
       if (i === ed.sel) for (let k = 0; k < pts.length; k++) { const q = pts[(k + 1) % pts.length]; if (Math.hypot((pts[k][0] + q[0]) / 2 - px, (pts[k][1] + q[1]) / 2 - py) <= HIT) return {zone: i, mid: k}; }
     }
+    const lh = lineHit(px, py); if (lh) return lh;
     const n = toNorm(px, py); let best = -1, bestArea = Infinity;
     ed.zones.forEach((z, i) => { if (inPoly(n[0], n[1], z.points)) { const a = polyArea(z.points); if (a < bestArea) { best = i; bestArea = a; } } });
     return best >= 0 ? {zone: best, body: true} : null;
@@ -720,6 +762,11 @@
     if (!ed || e.button > 0) return;
     const pos = evPos(e), h = editHit(pos[0], pos[1]);
     if (!h) { ed.sel = -1; ed.vtx = -1; renderEditBar(); drawOverlay(); return; }
+    if (h.line) {
+      ed.sel = LINE; ed.vtx = -1; ed.drag = h.end !== undefined ? {kind: 'lineEnd', end: h.end} : {kind: 'lineBody', last: toNorm(pos[0], pos[1])};
+      try { overlay.setPointerCapture(e.pointerId); } catch (x) { /* synthetic pointer */ }
+      e.preventDefault(); renderEditBar(); drawOverlay(); return;
+    }
     ed.sel = h.zone; const z = ed.zones[h.zone];
     if (h.mid !== undefined) { const a = z.points[h.mid], b = z.points[(h.mid + 1) % z.points.length]; z.points.splice(h.mid + 1, 0, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); z.geo = true; h.vtx = h.mid + 1; }
     if (h.vtx !== undefined) { ed.vtx = h.vtx; ed.drag = {kind: 'corner'}; }
@@ -731,6 +778,17 @@
     if (!ed) return;
     const pos = evPos(e);
     if (!ed.drag) { const h = editHit(pos[0], pos[1]); overlay.style.cursor = !h ? 'default' : h.body ? 'move' : h.mid !== undefined ? 'copy' : 'grab'; return; }
+    if (ed.drag.kind === 'lineEnd' || ed.drag.kind === 'lineBody') {
+      const L = ed.line, n = toNorm(pos[0], pos[1]);
+      if (ed.drag.kind === 'lineEnd') L.pts[ed.drag.end] = n;
+      else {
+        const xs = L.pts.map(p => p[0]), ys = L.pts.map(p => p[1]);       // both ends stay inside the picture
+        const dx = Math.max(-Math.min(...xs), Math.min(1 - Math.max(...xs), n[0] - ed.drag.last[0]));
+        const dy = Math.max(-Math.min(...ys), Math.min(1 - Math.max(...ys), n[1] - ed.drag.last[1]));
+        if (dx || dy) { L.pts = L.pts.map(p => [p[0] + dx, p[1] + dy]); ed.drag.last = [ed.drag.last[0] + dx, ed.drag.last[1] + dy]; }
+      }
+      drawOverlay(); return;
+    }
     const z = ed.zones[ed.sel], n = toNorm(pos[0], pos[1]);
     if (ed.drag.kind === 'corner') { z.points[ed.vtx] = n; z.geo = true; }
     else {
@@ -753,6 +811,14 @@
 
   // ---- editor buttons
   $('#btnEdit').onclick = () => { if (ed) stopEdit(false); else startEdit(); };
+  $('#btnEdLine').onclick = () => startEdit(null, {line: true});
+  $('#btnEdAddLine').onclick = () => { if (ed) selectLine(); };
+  $('#btnEdSwap').onclick = () => { if (ed && ed.line.pts) { ed.line.pts = [ed.line.pts[1], ed.line.pts[0]]; renderEditBar(); drawOverlay(); } };
+  $('#btnEdDelLine').onclick = () => {
+    if (!ed || !ed.line.pts) return;
+    ed.line.pts = null; ed.sel = -1; ed.vtx = -1; renderEditBar(); drawOverlay();
+    if (ed.line.orig) toast('The count line will be removed when you press Save changes. Without it, walk-ins are counted as visits.');
+  };
   $('#btnEdCancel').onclick = () => stopEdit(false);
   $('#edName').oninput = () => { if (ed && ed.sel >= 0) { ed.zones[ed.sel].name = $('#edName').value; renderEditBar(); drawOverlay(); } };
   $('#edRole').onchange = () => { if (ed && ed.sel >= 0) { ed.zones[ed.sel].role = $('#edRole').value; renderEditBar(); drawOverlay(); } };
@@ -776,18 +842,26 @@
       if (z.geo) c.points = z.points.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]);
       changes.push(c);
     });
+    const zoneChanges = changes.length, withLine = lineDirty();
+    if (withLine) {
+      const L = ed.line.pts;
+      if (L && Math.hypot(L[1][0] - L[0][0], L[1][1] - L[0][1]) < 0.02) { toast('The count line is too short: drag its ends apart.'); return; }
+      changes.push(L ? {op: 'line', points: L.map(p => [+p[0].toFixed(4), +p[1].toFixed(4)])} : {op: 'line', remove: true});
+    }
     if (!changes.length) { stopEdit(true); return; }
+    const what = !withLine ? 'Zones' : zoneChanges ? 'Zones and count line' : (ed.line.pts ? 'Count line' : 'Count line removal');
     const go = async () => {
       $('#btnEdSave').disabled = true;
       const r = await sendZoneChanges(changes, go);
       if (!ed) return;
       if (!r) { renderEditBar(); return; }
-      reportZoneResult(r, needCe() ? 'Zones saved in Congruence Eye.' : 'Zones saved.');
+      reportZoneResult(r, needCe() ? `${what} saved in Congruence Eye.` : `${what} saved.`);
       const failed = new Set((r.errors || []).map(x => x.zone));
       if (!failed.size || r.synced === false) { stopEdit(true); return; }
       // keep the editor open with only what could not be saved still marked as changed
       ed.removed = ed.removed.filter(n => failed.has(n));
       ed.zones.forEach(z => { if (!failed.has(z.orig)) { z.name = tidy(z); z.orig = z.name; z.origRole = z.role; z.geo = false; } });
+      if (!failed.has(LINE_LABEL)) ed.line.orig = copyPts(ed.line.pts);
       renderEditBar(); drawOverlay();
     };
     await go();

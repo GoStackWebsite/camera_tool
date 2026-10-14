@@ -1,14 +1,20 @@
-"""Zone editing from the camera view (reshape, rename, change the role, add, remove).
+"""Zone and count line editing from the camera view (reshape, rename, change the role, add, remove; move
+the count line's ends and choose its IN side).
 
 * Hand-made cameras: the change is applied to data/config.json through the manager.
 * Managed cameras: Congruence Eye stays the source of truth. The change is written to the server's zone
   API, then the server configuration is pulled and applied, so both sides always show the same zones.
   That API needs an admin sign-in (the edge key cannot change master data); the page signs in through
   ``ce_login`` and sends the token with every edit. The token is never stored by this app.
+
+The count line travels as ``{"op": "line", "points": [A, B]}`` with this app's orientation (the + side of
+A->B is IN), or ``{"op": "line", "remove": true}``. On Congruence Eye it is the camera's ENTRY_LINE zone,
+whose IN side is a screen direction (``inDirection``): the direction nearest to the line's IN normal.
 """
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import replace
 
@@ -16,7 +22,7 @@ import requests
 
 from .config import ZONE_ROLES, ZoneConfig
 from .congruence import fetch_config
-from .sync import ROLE_TO_TYPE, frame_to_stage
+from .sync import DIRECTIONS, ROLE_TO_TYPE, frame_to_stage
 
 log = logging.getLogger("zone_edit")
 
@@ -24,6 +30,9 @@ TIMEOUT = 15
 ADMIN_ROLES = ("SUPER_ADMIN", "ADMIN")
 MAX_NAME = 40
 MAX_POINTS = 64
+MIN_LINE = 0.02          # shortest count line (fraction of the frame): a shorter one is a slip of the mouse
+LINE_NAME = "Entrance"   # name of a count line created from the camera view (never "Pass...": that is the pass-by line)
+LINE_LABEL = "count line"
 
 
 class ZoneEditError(Exception):
@@ -69,6 +78,30 @@ def clean_points(points) -> list[list[float]]:
     return out
 
 
+def clean_line(points) -> list[list[float]]:
+    """Two ends, clamped to the frame and rounded, far enough apart to be a line."""
+    pts = list(points or [])
+    if len(pts) != 2:
+        raise ZoneEditError(422, "the count line needs exactly 2 ends")
+    try:
+        out = [[round(min(1.0, max(0.0, float(p[0]))), 4), round(min(1.0, max(0.0, float(p[1]))), 4)] for p in pts]
+    except (TypeError, ValueError, IndexError):
+        raise ZoneEditError(422, "the count line's ends must be [x, y] numbers")
+    if math.hypot(out[1][0] - out[0][0], out[1][1] - out[0][1]) < MIN_LINE:
+        raise ZoneEditError(422, "the count line is too short: drag its ends apart")
+    return out
+
+
+def in_direction(line) -> str:
+    """Congruence Eye's inDirection for a line whose + side of A->B is IN: the screen direction (y down)
+    nearest to the IN normal (-dy, dx). Its dot product with the normal is always positive, so the server's
+    orient_line gives back exactly this line, also after the 16:9 stage mapping (it scales x and y by
+    positive factors, which keeps the sign)."""
+    (ax, ay), (bx, by) = line
+    nx, ny = -(by - ay), bx - ax
+    return max(DIRECTIONS, key=lambda d: DIRECTIONS[d][0] * nx + DIRECTIONS[d][1] * ny)
+
+
 def same_points(a, b) -> bool:
     return len(a) == len(b) and all(abs(float(p[0]) - float(q[0])) < 5e-5 and abs(float(p[1]) - float(q[1])) < 5e-5
                                     for p, q in zip(a, b))
@@ -89,7 +122,18 @@ def _check_free(zones: list[ZoneConfig], name: str, skip: ZoneConfig | None = No
 
 
 def _label(ch: dict) -> str:
+    if ch.get("op") == "line":
+        return LINE_LABEL
     return str(ch.get("zone") or ch.get("name") or "zone")
+
+
+def _wanted_line(ch: dict) -> list[list[float]] | None:
+    """The line a "line" change asks for (None = remove it)."""
+    if ch.get("remove"):
+        return None
+    if ch.get("points") is None:
+        raise ZoneEditError(422, "send the count line's 2 ends, or remove: true")
+    return clean_line(ch["points"])
 
 
 # ---------------------------------------------------------------- hand-made cameras
@@ -135,16 +179,23 @@ def apply_local(config_store, manager, cam_id: str, changes: list[dict]) -> dict
         if cam.managed:
             raise ZoneEditError(409, "this camera is managed by Congruence Eye")
         zones = list(cam.zones)
+        line = cam.line
     renames: dict[str, str] = {}
     applied, errors = 0, []
     for ch in changes:
         try:
-            _apply_local_one(zones, ch, renames)
+            if ch.get("op") == "line":
+                want = _wanted_line(ch)
+                if want == line or (want and line and same_points(want, line)):
+                    continue
+                line = want
+            else:
+                _apply_local_one(zones, ch, renames)
             applied += 1
         except ZoneEditError as e:
             errors.append({"zone": _label(ch), "error": e.message})
     if applied:
-        manager.update_camera(replace(cam, zones=zones), renames=renames)
+        manager.update_camera(replace(cam, zones=zones, line=line), renames=renames)
         if renames:                          # a hand-made mapping to Congruence Eye follows the new name
             with config_store.lock:
                 m = dict(config_store.config.congruence.zones or {})
@@ -246,9 +297,34 @@ def _managed_type(role) -> str:
     return ROLE_TO_TYPE[role]
 
 
+def _apply_managed_line(api: CEAdmin, cam, ch: dict, store_id) -> bool:
+    """The count line on the server: the camera's ENTRY_LINE zone (the pass-by line is a different one)."""
+    want = _wanted_line(ch)
+    zid = (cam.remote_line or {}).get("zone_id")
+    if want is None:
+        if not zid:
+            return False
+        api.request("DELETE", f"/api/zones/{int(zid)}")             # the server keeps it, marked inactive
+        return True
+    if zid and cam.line and same_points(want, [[min(1.0, max(0.0, float(q[0]))), min(1.0, max(0.0, float(q[1])))]
+                                               for q in cam.line]):
+        return False
+    body = {"polygon": [frame_to_stage(p, cam.frame_w, cam.frame_h) for p in want], "inDirection": in_direction(want)}
+    if zid:
+        api.request("PATCH", f"/api/zones/{int(zid)}", body)
+        return True
+    if not store_id:
+        raise ZoneEditError(409, "the store is not known yet: press Sync now in Settings > Congruence Eye")
+    api.request("POST", "/api/zones", {"storeId": int(store_id), "cameraId": int(cam.remote_id), "name": LINE_NAME,
+                                       "type": "ENTRY_LINE", **body})
+    return True
+
+
 def _apply_managed_one(api: CEAdmin, cam, zones: list[ZoneConfig], ch: dict, store_id) -> bool:
     """One change on the server. Returns False when there was nothing to change."""
     op = ch.get("op")
+    if op == "line":
+        return _apply_managed_line(api, cam, ch, store_id)
 
     def stage(pts):
         return [frame_to_stage(p, cam.frame_w, cam.frame_h) for p in pts]

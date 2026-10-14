@@ -328,11 +328,12 @@ async def update_layout(cam_id: str, body: LayoutIn):
 
 
 class ZoneChangeIn(BaseModel):
-    op: str = Field(pattern="^(create|update|delete)$")
+    op: str = Field(pattern="^(create|update|delete|line)$")   # line: the count line (2 points, + side of A->B = IN)
     zone: str | None = Field(None, max_length=80)        # current name (update / delete)
     name: str | None = Field(None, max_length=80)
     role: str | None = Field(None, pattern="^(" + "|".join(ZONE_ROLES) + ")$")
     points: list[tuple[float, float]] | None = Field(None, max_length=64)
+    remove: bool = False                                 # line: take the count line away
 
 
 class ZoneEditIn(BaseModel):
@@ -390,8 +391,8 @@ async def congruence_session(x_ce_token: str | None = Header(None)):
 
 @app.post("/api/cameras/{cam_id}/zones/edit")
 async def edit_zones(cam_id: str, body: ZoneEditIn, x_ce_token: str | None = Header(None)):
-    """Zone edits from the camera view. A managed camera's zones are changed on Congruence Eye (admin token in
-    X-CE-Token) and synced back; a hand-made camera's zones are changed here."""
+    """Zone and count line edits from the camera view. A managed camera's zones and line are changed on
+    Congruence Eye (admin token in X-CE-Token) and synced back; a hand-made camera's are changed here."""
     cam = rt.config_store.config.camera(cam_id)
     if cam is None:
         raise HTTPException(404, "no such camera")
