@@ -94,6 +94,7 @@ ENTRY_HOLD_SECONDS = 6.0     # an IN crossing is booked (customer walk-in or sta
 REFIND_SECONDS = 4.0         # a person appearing where one was lost this recently, within STAFF_GHOST_DISTANCE, is the
                              # same person: verdict, votes, manual tag and demographics carry over (tracker id switch)
 EDGE_MARGIN = 0.02           # a box ending this close to the frame border belongs to someone who may have walked out
+DOOR_RADIUS = 0.08           # ... and so does a foot point this close to the count line (the door can be mid-frame)
 MODEL_PEER_DEMOTE = 0.65     # two cameras see one person (store fusion): "uniform" is taken back when the other view says
                              # customer and the pooled score of both views is at or below this
 
@@ -916,6 +917,21 @@ class Analytics:
             self._set_staff(t, now, "uniform")          # the other camera has the clear view of the uniform
             t.judged = True
 
+    def _peer_decides(self, t: Track) -> bool:
+        """Another camera with the better view of this spot (store fusion "trust") has judged the clothing: this
+        camera's own votes must not overturn it, or the two would take turns (promote, demote) every few frames."""
+        return t.peer_trust == "peer" and t.peer_n >= MODEL_MIN_SAMPLES
+
+    def _near_door(self, fx: float, fy: float) -> bool:
+        """Close to the count line: people come and go here, so someone appearing is not the person just lost."""
+        line = self.cam.line
+        if not line:
+            return False
+        (ax, ay), (bx, by) = line
+        dx, dy = bx - ax, by - ay
+        u = max(0.0, min(1.0, ((fx - ax) * dx + (fy - ay) * dy) / ((dx * dx + dy * dy) or 1e-12)))
+        return math.hypot(fx - (ax + u * dx), fy - (ay + u * dy)) <= DOOR_RADIUS
+
     def _at_edge(self, t: Track) -> bool:
         """The box ends at the frame border: the person may have walked out of view there."""
         w, h = self._frame_wh
@@ -928,7 +944,8 @@ class Analytics:
         """What is known about a track's identity, to hand to the track that continues it."""
         fx, fy = t.foot
         in_zone = t.staff_zone_out == 0.0 and t.staff_zone_time > 0.0
-        return {"ts": t.last_seen, "fx": fx, "fy": fy, "in_zone": in_zone, "edge": self._at_edge(t), "bank": t.staff_zone_time,
+        return {"ts": t.last_seen, "fx": fx, "fy": fy, "in_zone": in_zone, "edge": self._at_edge(t) or self._near_door(fx, fy),
+                "bank": t.staff_zone_time,
                 "is_staff": t.is_staff, "reason": t.staff_reason, "manual": t.manual_staff, "brand": t.brand,
                 "brand_votes": dict(t.brand_votes), "votes": list(t.model_votes), "demotions": t.model_demotions,
                 "judged": t.judged, "first_vote_ts": t.first_vote_ts, "gender_votes": list(t.gender_votes),
@@ -952,7 +969,7 @@ class Analytics:
             if o is t or key in ids_now or o.handed_over or now - o.last_seen > LOST_TIMEOUT:
                 continue
             in_zone = o.staff_zone_out == 0.0 and o.staff_zone_time > 0.0
-            if not in_zone and self._at_edge(o):
+            if not in_zone and (self._at_edge(o) or self._near_door(*o.foot)):
                 continue
             d = math.hypot(o.foot[0] - fx, o.foot[1] - fy)
             if d <= bd:
@@ -1125,13 +1142,14 @@ class Analytics:
                         t.staff_reason = "uniform"      # position and clothing agree: stays staff outside the zone
                     else:
                         self._set_staff(t, now, "uniform")
-                elif t.is_staff and t.staff_reason == "uniform" and len(recent) >= MODEL_RECENT_N and sum(recent) / len(recent) <= MODEL_RECENT_DEMOTE:
+                elif (t.is_staff and t.staff_reason == "uniform" and not self._peer_decides(t)
+                      and len(recent) >= MODEL_RECENT_N and sum(recent) / len(recent) <= MODEL_RECENT_DEMOTE):
                     t.is_staff = False
                     t.staff_reason = ""
                     t.brand = None
                     t.model_demotions += 1
                     self._event(now, "staff", t.id, f"Person #{t.id} no longer looks like staff (recent samples), counted as customer")
-                elif t.is_staff and t.staff_reason == "uniform" and n >= MODEL_MIN_SAMPLES and mean <= MODEL_CUSTOMER_PROB:
+                elif t.is_staff and t.staff_reason == "uniform" and not self._peer_decides(t) and n >= MODEL_MIN_SAMPLES and mean <= MODEL_CUSTOMER_PROB:
                     t.is_staff = False
                     t.staff_reason = ""
                     t.model_demotions += 1

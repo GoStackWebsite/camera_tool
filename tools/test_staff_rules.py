@@ -320,6 +320,23 @@ def main() -> int:
     t, crossed = walk_in(an, m, 91, 0.03, t)
     check("... while a customer walking in beside it is still counted", an.entries == 1, f"entries={an.entries}")
 
+    # 17. the door is in the middle of the frame (glass door at the back): someone appearing there is not the
+    #     member of staff who just walked out
+    mid_door = [[0.68, 0.35], [0.78, 0.40]]
+    an, m = make(line=mid_door, zone=[[0.88, 0.60], [1.0, 0.60], [1.0, 1.0], [0.88, 1.0]])   # the door is not in a staff zone
+    t = run(an, m, 95, (0.73, 0.40), 3.0, 0.97, 1000.0, step=0.07)      # staff at the door ...
+    t = lose(an, t, 2.0)                                                 # ... walks out
+    d = det(96, (0.73, 0.41))
+    m.by_x[d.x1] = None
+    an.update([d], W, H, t, None, FRAME)
+    check("door mid-frame: the next person through it does not inherit the last one's verdict", not an.tracks[96].is_staff and not an.tracks[96].judged,
+          state(an, 96))
+    t = run(an, m, 97, ON_FLOOR, 3.0, 0.97, t + 1, step=0.07)
+    d = det(98, ON_FLOOR)
+    m.by_x[d.x1] = 0.97
+    an.update([d], W, H, t, None, FRAME)
+    check("... while away from the door an id switch still carries over", an.tracks[98].is_staff, state(an, 98))
+
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
     return 1 if failed else 0

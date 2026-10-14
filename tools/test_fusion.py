@@ -221,6 +221,13 @@ def main() -> int:
     check("trusted close-up sees staff where the overview is unsure: staff on both cameras", s.track("A", 82).is_staff and s.track("B", 112).is_staff,
           f"A: {who(s.track('A', 82))} | B: {who(s.track('B', 112))}")
 
+    # 13. the trusted camera says staff, this camera's own view says customer: no tug of war (seen live: 57 flips in 30 s)
+    s = Shop(trust="B")
+    s.run(15.0, {"A": [(83, A_FRONT, 0.05, None, 300)], "B": [(113, B_FRONT, 0.98, None, 300)]})
+    flips = sum(1 for e in s.an["A"].events if e["type"] == "staff" and e["track_id"] == 83)
+    check("trusted view says staff, own view disagrees: staff, decided once, no flip-flop", s.track("A", 83).is_staff and flips <= 1,
+          f"staff events on A: {flips}, {who(s.track('A', 83))}")
+
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
     return 1 if failed else 0
