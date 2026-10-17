@@ -95,6 +95,12 @@ REFIND_SECONDS = 4.0         # a person appearing where one was lost this recent
                              # same person: verdict, votes, manual tag and demographics carry over (tracker id switch)
 EDGE_MARGIN = 0.02           # a box ending this close to the frame border belongs to someone who may have walked out
 DOOR_RADIUS = 0.08           # ... and so does a foot point this close to the count line (the door can be mid-frame)
+REID_MIN_SAMPLES = 3         # one walk-in per person: appearance samples of a newcomer before comparing with recent leavers
+REID_FAST_SECONDS = 0.3      # ... taken this often until there are enough, then every REID_SLOW_SECONDS
+REID_SLOW_SECONDS = 1.0
+REID_KEEP = 12               # most recent samples kept per person (their mean is the person's appearance)
+REVISIT_HOLD_SECONDS = 10.0  # an IN crossing waits at most this long for those samples while someone who just left could
+                             # be coming back; with nobody on that list it is booked as quickly as before
 MODEL_PEER_DEMOTE = 0.65     # two cameras see one person (store fusion): "uniform" is taken back when the other view says
                              # customer and the pooled score of both views is at or below this
 
@@ -203,6 +209,16 @@ class Track:
     peer_trust: str = ""                            # whose view of the clothing counts here: "own", "peer" or "" (pooled)
     linked_s: float = 0.0                           # seconds this track has been linked to another camera's track
     zone_vid: dict = field(default_factory=dict)    # zone -> visitor id its ZONE_ENTER was sent with
+    visitor_key: str | None = None                  # Congruence Eye visitorId of the visit this person belongs to (an
+                                                    # earlier visit's id once they are recognised as coming back)
+    in_booked: bool = False                         # one walk-in per person: this person's IN is counted ...
+    in_ts: float = 0.0
+    out_booked: bool = False                        # ... and their OUT
+    out_ts: float = 0.0
+    revisit_of: str = ""                            # who they were recognised as on coming back in
+    reid_embs: list = field(default_factory=list)   # appearance embeddings (unit vectors) from clean views
+    reid_cols: list = field(default_factory=list)   # ... and colour histograms of the same views
+    reid_ts: float = 0.0
     group_id: str | None = None
     crossed_in: bool = False
     phone_since: float | None = None
@@ -250,6 +266,8 @@ class Analytics:
         self.staff_model = staff_model            # app.staffcls.StaffClassifier (learned uniform), optional
         self._ghosts: list = []                   # identities of recently lost tracks (see _leave_ghost / _inherit_identity)
         self.fusion = None                        # app.fusion.StoreFusion when several cameras share floor (set by the manager)
+        self.embedder = None                      # app.reid.Embedder of this camera (set by the manager)
+        self.revisits = None                      # app.reid.RevisitGate of the store: who left recently (set by the manager)
         self.id_tag = ""                          # on-screen prefix of this camera's own track numbers ("B-" on a second camera)
         self._fusion_ts = 0.0
         self._frame_wh = (0, 0)
@@ -286,6 +304,8 @@ class Analytics:
             self.exits = 0
             self.staff_entries = 0
             self.staff_exits = 0
+            self.reentries = 0              # customers back in within reentry_minutes: not new walk-ins
+            self.reexits = 0
             self.passby = 0
             self.groups_in = 0
             self.unique_ids: set[int] = set(self.tracks.keys())
@@ -417,6 +437,7 @@ class Analytics:
                 seen.add(d.track_id)
                 if frame is not None:
                     self._sample_torso(t, frame, now)
+                    self._sample_reid(t, frame, now)
                 self._update_motion(t, now, aspect)
                 self._update_line(t, now, fx, fy)
                 if self.cam.passby_line:
@@ -500,6 +521,7 @@ class Analytics:
                 "exits": self.exits,
                 "staff_entries": self.staff_entries,
                 "staff_exits": self.staff_exits,
+                "reentries": self.reentries, "reexits": self.reexits,
                 "identifying": sum(1 for t in active if not t.is_staff and not t.judged),
                 "id_tag": self.id_tag,
                 "dup_customers": sum(1 for t in customers if t.duplicate),      # also counted by the store's overview camera
@@ -781,14 +803,20 @@ class Analytics:
             else:
                 if t.pending_entry is not None:
                     self._book_entry(t)              # stepped in and straight out: keep the order ENTRY, EXIT
-                if t.is_staff:
-                    self.staff_exits += 1
-                else:
-                    self.exits += 1
-                    self._minute["exits"] += 1
                 self._event(now, "line_out", t.id, f"Person #{t.id} crossed OUT")
-                self._record_crossing(now, "out", t)
-                self._emit_ce("EXIT", t, now, dwell=now - t.first_seen)
+                if not t.is_staff and self._repeat_exit(t, now):
+                    self.reexits += 1                # their way out is counted already: no second EXIT
+                    self._event(now, "reexit", t.id, f"Person #{t.id} went out again: exit already counted")
+                    self._record_crossing(now, "return_out", t)
+                else:
+                    if t.is_staff:
+                        self.staff_exits += 1
+                    else:
+                        self.exits += 1
+                        self._minute["exits"] += 1
+                        t.out_booked, t.out_ts = True, now
+                    self._record_crossing(now, "out", t)
+                    self._emit_ce("EXIT", t, now, dwell=now - t.first_seen)
             t.last_cross_ts = now
         t.side = s
         t.side_pt = (fx, fy)
@@ -804,7 +832,8 @@ class Analytics:
         """Book a held IN crossing as soon as it is known who came in: staff, a customer, or nobody could tell in
         ENTRY_HOLD_SECONDS. People enter under the camera, where no clothing is visible, so at the moment of the
         crossing everybody would be a customer and every member of staff coming back in a walk-in."""
-        if t.is_staff or t.judged or not self.staff_detection_active or now - t.pending_entry >= ENTRY_HOLD_SECONDS:
+        known = t.is_staff or t.judged or not self.staff_detection_active or now - t.pending_entry >= ENTRY_HOLD_SECONDS
+        if known and (t.is_staff or not self._reid_pending(t, now) or now - t.pending_entry >= REVISIT_HOLD_SECONDS):
             self._book_entry(t)
 
     def _book_entry(self, t: Track) -> None:
@@ -812,10 +841,100 @@ class Analytics:
         if t.is_staff:
             self.staff_entries += 1
         else:
+            why = self._repeat_entry(t, ts)
+            if why:                              # the same person again: no walk-in, no ENTRY for Congruence Eye
+                self.reentries += 1
+                self._event(ts, "reentry", t.id, f"Person #{t.id} came back in ({why}): same walk-in")
+                self._record_crossing(ts, "return_in", t)
+                return
             self.entries += 1
             self._minute["entries"] += 1
+            t.in_booked, t.in_ts = True, ts
         self._record_crossing(ts, "in", t)
         self._emit_ce("ENTRY", t, ts)
+
+    # ---- one walk-in per person ---------------------------------------------
+    @property
+    def reentry_window(self) -> float:
+        return max(0.0, float(self.thr.reentry_minutes or 0.0)) * 60.0
+
+    def _reid_active(self) -> bool:
+        return self.embedder is not None and self.revisits is not None and self.reentry_window > 0 and bool(self.cam.line)
+
+    def _reid_pending(self, t: Track, now: float) -> bool:
+        """Should this IN crossing wait for appearance samples? Only for a customer not yet counted, too few samples,
+        and somebody on the store's list of recent leavers they could be."""
+        if t.is_staff or not self._reid_active() or len(t.reid_embs) >= REID_MIN_SAMPLES:
+            return False
+        if t.in_booked and t.pending_entry is not None and t.pending_entry - t.in_ts <= self.reentry_window:
+            return False                         # crossed in again: decided without looking
+        return self.revisits.waiting(t.pending_entry if t.pending_entry is not None else now, self.reentry_window)
+
+    def _sample_reid(self, t: Track, frame: np.ndarray, now: float) -> None:
+        """Appearance samples (clothing and build, no face) for recognising a customer who comes back in. Only clean
+        views: nobody else in front, not cut off by the frame bottom."""
+        if t.is_staff or not self._reid_active():
+            return
+        if now - t.reid_ts < (REID_FAST_SECONDS if len(t.reid_embs) < REID_MIN_SAMPLES else REID_SLOW_SECONDS):
+            return
+        t.reid_ts = now
+        if not self._crop_is_clean(t, frame):
+            return
+        emb = self.embedder.embed(frame, t.bbox)
+        col = self.embedder.colour(frame, t.bbox) if emb is not None else None
+        if emb is not None and col is not None:
+            t.reid_embs.append(emb)
+            t.reid_cols.append(col)
+            del t.reid_embs[:-REID_KEEP], t.reid_cols[:-REID_KEEP]
+
+    @staticmethod
+    def _reid_mean(t: Track) -> tuple[np.ndarray, np.ndarray] | None:
+        """The person's appearance: mean embedding (unit length) and mean colour histograms."""
+        if len(t.reid_embs) < REID_MIN_SAMPLES or len(t.reid_cols) != len(t.reid_embs):
+            return None
+        m = np.mean(np.stack(t.reid_embs), axis=0)
+        n = float(np.linalg.norm(m))
+        if not n:
+            return None
+        c = np.mean(np.stack(t.reid_cols), axis=0)
+        c = c / (c.sum(axis=1, keepdims=True) + 1e-9)
+        return m / n, c.astype(np.float32)
+
+    def _repeat_entry(self, t: Track, ts: float) -> str:
+        """Why this customer's IN crossing is not a new walk-in, or "" when it is one."""
+        win = self.reentry_window
+        if win <= 0:
+            return ""
+        if t.in_booked and ts - t.in_ts <= win:
+            return f"crossed in again {(ts - t.in_ts) / 60:.0f} min after coming in"
+        if t.in_booked or not self._reid_active():
+            return ""
+        look = self._reid_mean(t)
+        m = self.revisits.match(look[0], look[1], ts, win) if look is not None else None
+        if m is None:
+            return ""
+        t.in_booked, t.in_ts = True, ts           # their walk-in was counted on the earlier visit
+        t.out_booked, t.out_ts = bool(m["exited"]), m["ts"]
+        if m.get("visitor"):
+            t.visitor_key = m["visitor"]
+        who = f"#{m['track']}" + (f" on {m['cam']}" if m["cam"] != self.cam.id else "")
+        t.revisit_of = who
+        return (f"looks like {who} who left {max(0.0, ts - m['ts']) / 60:.0f} min ago, "
+                f"similarity {m['similarity']:.2f}, colour {m['colour_similarity']:.2f}")
+
+    def _repeat_exit(self, t: Track, now: float) -> bool:
+        """A customer whose way out has been counted already (on this visit, or the earlier one they came back from)."""
+        return self.reentry_window > 0 and t.out_booked and now - t.out_ts <= self.reentry_window
+
+    def _remember_leaver(self, t: Track) -> None:
+        """A customer who went out through the door goes on the store's list of recent leavers."""
+        if t.is_staff or t.handed_over or not self._reid_active():
+            return
+        if not t.out_booked and t.side >= 0:
+            return                               # lost inside the shop, not gone out of the door
+        look = self._reid_mean(t)
+        if look is not None:
+            self.revisits.remember(look[0], look[1], t.last_seen, self.cam.id, t.id, t.out_booked, t.visitor_key)
 
     def _assign_group(self, now: float, fx: float, fy: float, t: Track) -> str:
         """People crossing IN within group_window seconds and close together count as one group."""
@@ -861,7 +980,8 @@ class Analytics:
             staff_zones = [z.name for z in self.cam.zones if z.role == "staff"]
             return [{"id": t.id, "foot": t.foot, "torso": t.torso, "is_staff": t.is_staff, "reason": t.staff_reason,
                      "manual": t.manual_staff, "vsum": float(sum(t.model_votes)), "vn": len(t.model_votes),
-                     "staff_zone": next((z for z in staff_zones if z in t.zones), ""), "zones": list(t.zone_seq)}
+                     "staff_zone": next((z for z in staff_zones if z in t.zones), ""), "zones": list(t.zone_seq),
+                     "visitor_key": t.visitor_key}
                     for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
 
     def apply_fusion(self, links: dict, now: float, tag: str = "") -> None:
@@ -886,6 +1006,10 @@ class Analytics:
                 t.peer_n = sum(p["vn"] for p in peers)
                 t.peer_zone = next((p["staff_zone"] for p in peers if p["staff_zone"]), "")
                 t.peer_trust = l.get("trust", "")
+                if l["duplicate"]:                                                  # one person, one visit id
+                    key = next((p.get("visitor_key") for p in peers if p.get("visitor_key")), None)
+                    if key:
+                        t.visitor_key = key
                 for p in peers:
                     if p["manual"] is not None and t.manual_staff is None:        # a manual tag counts on every camera
                         t.manual_staff = p["manual"]
@@ -949,7 +1073,10 @@ class Analytics:
                 "is_staff": t.is_staff, "reason": t.staff_reason, "manual": t.manual_staff, "brand": t.brand,
                 "brand_votes": dict(t.brand_votes), "votes": list(t.model_votes), "demotions": t.model_demotions,
                 "judged": t.judged, "first_vote_ts": t.first_vote_ts, "gender_votes": list(t.gender_votes),
-                "age_samples": list(t.age_samples), "face_samples": t.face_samples, "gender": t.gender, "age": t.age}
+                "age_samples": list(t.age_samples), "face_samples": t.face_samples, "gender": t.gender, "age": t.age,
+                "in_booked": t.in_booked, "in_ts": t.in_ts, "out_booked": t.out_booked, "out_ts": t.out_ts,
+                "visitor_key": t.visitor_key, "revisit_of": t.revisit_of, "reid": list(t.reid_embs),
+                "reid_cols": list(t.reid_cols)}
 
     def _leave_ghost(self, t: Track) -> None:
         """Remember a closed track so that the same person, found again at the same spot, is not judged from scratch."""
@@ -999,6 +1126,9 @@ class Analytics:
         t.model_demotions, t.judged, t.first_vote_ts = g["demotions"], g["judged"] or t.judged, g["first_vote_ts"]
         t.gender_votes, t.age_samples, t.face_samples = list(g["gender_votes"]), list(g["age_samples"]), g["face_samples"]
         t.gender, t.age = g["gender"], g["age"]
+        t.in_booked, t.in_ts, t.out_booked, t.out_ts = g["in_booked"], g["in_ts"], g["out_booked"], g["out_ts"]
+        t.visitor_key, t.revisit_of = g["visitor_key"], g["revisit_of"]
+        t.reid_embs, t.reid_cols = list(g["reid"]), list(g["reid_cols"])
 
     def _update_staff_zone(self, t: Track, now: float, dt: float, zone: str | None) -> None:
         """A staff zone says where someone stands, not who they are. So the presence has to be sustained (time
@@ -1272,6 +1402,7 @@ class Analytics:
             t.staff_reason = "staff zone"
         if t.pending_entry is not None:
             self._book_entry(t)                 # gone before anybody could tell: booked with what is known now
+        self._remember_leaver(t)
         second_view = t.duplicate or t.linked_s >= 0.5 * max(dwell, 1.0)     # the overview camera records this person's visit
         if not t.is_staff and not second_view:
             self.completed_dwells.append(dwell)

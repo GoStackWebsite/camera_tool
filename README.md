@@ -8,7 +8,8 @@ Telegram / webhook / e-mail, and a daily Excel report.
 ## Modules
 
 **Traffic** (footfall)
-- Walk-ins and exits over a counting line drawn on the entrance camera
+- Walk-ins and exits over a counting line drawn on the entrance camera; **one walk-in per person**: someone who
+  comes back in within `reentry_minutes` (30 min by default) is not counted again (see below)
 - Group counting: people entering within a couple of seconds of each other count as one group
 - Engaged vs bounced visits (by dwell time), average dwell, peak hours, weekday × hour heat grid
 - Conversion = bills ÷ walk-ins (enter daily bill counts from your POS under Settings)
@@ -297,6 +298,29 @@ colour, and one person on each side is still not linked when their clothing is c
 
 People only a second camera can see keep that camera's number with a letter (`B-7`), so a bare number always
 means the overview camera's person. `GET /api/stats` lists the live links under `fusion`.
+
+## One walk-in per person (2026-10-17)
+
+Settings › Thresholds › *Same person back in within (min)* (`thresholds.reentry_minutes`, default 30, 0 = count
+every entry). A customer is counted once however often they go in and out within that time:
+
+- **Still in view** (the same track, also after a tracker id switch): their first IN is the walk-in and their first
+  OUT the exit; later crossings are logged as *back in* / *out again* and not counted.
+- **Left the view and came back** (a new track): when a customer goes out of the door, their appearance goes on the
+  store's list of recent leavers (`app/reid.py` `RevisitGate`). Someone walking in is compared with that list only,
+  never with a whole day's gallery. A match needs both an appearance-embedding cosine of at least 0.90 and an
+  upper/lower-body colour similarity of at least 0.60, clearly ahead of any second leaver; anything less is a new
+  walk-in. While somebody is on the list, a new IN crossing waits up to 10 s for three clean views of the newcomer.
+- Measured on 281 shop snapshots of 12-13 Oct: the embedding alone matched 13 % of pairs of different people at
+  0.90; with the colour check, none of 145 different-people pairs matched and 95 % of same-person pairs did. Real
+  returns look less alike than those pairs (other pose and light), so some are still counted twice: the rule errs
+  towards counting. No faces are used.
+- Congruence Eye: a return sends no ENTRY or EXIT, so its walk-ins (footfallIn), exits and unique visitors stay at
+  one. The returnee's zone events carry the first visit's visitorId (`Track.visitor_key`, also copied to the
+  second camera by store fusion). Staff entries are not affected.
+- Dashboard: "Walk-ins today" shows how many came back (crossings stored as `return_in` / `return_out`); the event
+  log says why ("crossed in again" or "looks like #12 who left 4 min ago, similarity 0.93, colour 0.71").
+- Test: `tools\test_reentry.py` (fake appearance model, 20 checks).
 
 ## Tests and tooling
 

@@ -270,7 +270,7 @@
         <label>Engaged visit after (s)<input name="engage_seconds" type="number" step="1"></label><label>Zone engaged after (s)<input name="zone_engage_seconds" type="number" step="1"></label>
         <label>Group window (s)<input name="group_window" type="number" step="0.5"></label><label>Group distance (frame fraction)<input name="group_distance" type="number" step="0.05"></label>
         <label>Queue: people allowed<input name="queue_max" type="number" step="1"></label><label>Queue: breach after (s)<input name="queue_seconds" type="number" step="5"></label>
-        <label>Unattended customer after (s)<input name="unattended_seconds" type="number" step="5"></label><label>Staff attending within (frame fraction)<input name="attend_distance" type="number" step="0.05"></label>
+        <label>Same person back in within (min) = one walk-in, 0 = count every entry<input name="reentry_minutes" type="number" step="5" min="0"></label><label>Unattended customer after (s)<input name="unattended_seconds" type="number" step="5"></label><label>Staff attending within (frame fraction)<input name="attend_distance" type="number" step="0.05"></label>
         <label class="check"><input name="phone_detection" type="checkbox">Detect phone use (off: no phone boxes, alerts or Mobile usage detections)</label><label>Phone use alert after (s)<input name="phone_seconds" type="number" step="1"></label><label class="check"><input name="phone_everyone" type="checkbox">Phone alerts for customers too</label>
         <label>Classify as staff after (s in staff zone)<input name="staff_zone_seconds" type="number" step="5"></label><label>Lingering after (s)<input name="loiter_seconds" type="number" step="30"></label>
         <label>Count line: dead band (frame fraction)<input name="line_margin" type="number" step="0.005" min="0"></label><label>Count line: confirm after (frames)<input name="line_min_frames" type="number" step="1" min="1"></label><label>Count line: cooldown (s)<input name="line_cooldown_seconds" type="number" step="0.5" min="0"></label>
@@ -881,8 +881,8 @@
       row.appendChild(act); box.appendChild(row);
     }
   }
-  const EV_GROUPS = {line: ['line_in', 'line_out'], zone: ['zone_enter', 'zone_exit'], sop: ['staff', 'phone', 'loiter', 'running'], presence: ['enter', 'leave']};
-  const EV_CHIP = {line_in: ['in', 'IN'], line_out: ['out', 'OUT'], loiter: ['warn', 'linger'], phone: ['serious', 'phone'], staff: ['in', 'staff'], running: ['serious', 'running'], zone_enter: ['', 'zone'], zone_exit: ['', 'zone'], enter: ['', 'appear'], leave: ['', 'leave']};
+  const EV_GROUPS = {line: ['line_in', 'line_out', 'reentry', 'reexit'], zone: ['zone_enter', 'zone_exit'], sop: ['staff', 'phone', 'loiter', 'running'], presence: ['enter', 'leave']};
+  const EV_CHIP = {line_in: ['in', 'IN'], line_out: ['out', 'OUT'], reentry: ['', 'back in'], reexit: ['', 'out again'], loiter: ['warn', 'linger'], phone: ['serious', 'phone'], staff: ['in', 'staff'], running: ['serious', 'running'], zone_enter: ['', 'zone'], zone_exit: ['', 'zone'], enter: ['', 'appear'], leave: ['', 'leave']};
   $('#evFilter').onchange = () => S && renderEvents(Object.values(S.cameras));
   function renderEvents(cams) {
     const box = $('#events'); const f = $('#evFilter').value; box.innerHTML = '';
@@ -968,7 +968,7 @@
     } catch (e) { toast('Load failed: ' + e.message); }
   }
   function renderDashboardTraffic(t) {
-    $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` : 'no line crossings yet: counting visits';
+    $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` + (t.returns ? ` · ${t.returns} came back (not counted again)` : '') : 'no line crossings yet: counting visits';
     $('#kEng').textContent = t.engaged_pct + '%'; $('#kEngSub').textContent = `${t.engaged} engaged · ${t.bounced} bounced`;
     $('#kDwell').textContent = t.avg_dwell ? fmtDur(t.avg_dwell) : '–';
     $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings or connect the POS' : `${t.sales.bills} bills`;

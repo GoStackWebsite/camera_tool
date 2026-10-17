@@ -3,7 +3,10 @@ unique visitor. Appearance only (clothing / build), no face recognition: an Imag
 network embeds the upper body of each track, the mean embedding is compared (cosine) with the day's gallery.
 
 Limits, by design: people in near-identical clothing can merge, a changed outfit splits; staff are never matched.
-One instance per camera pipeline (the ultralytics predictor is not thread-safe); the gallery is shared per store."""
+One instance per camera pipeline (the ultralytics predictor is not thread-safe); the gallery is shared per store.
+
+In use: Embedder + RevisitGate (one walk-in per person, app/analytics.py). VisitorGallery is the whole-day prototype
+and is not wired in: on 10 Oct its MATCH_THRESHOLD of 0.82 also matched about two thirds of pairs of different people."""
 from __future__ import annotations
 
 import logging
@@ -11,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 log = logging.getLogger("reid")
@@ -63,6 +67,10 @@ class Embedder:
         except Exception as e:
             log.debug("embed failed: %s", e)
             return None
+
+    @staticmethod
+    def colour(frame: np.ndarray, bbox: tuple) -> np.ndarray | None:
+        return colour_signature(frame, bbox)
 
 
 class VisitorGallery:
@@ -152,3 +160,91 @@ class VisitorGallery:
             self.store.save_visitor(vid, v["emb"].astype(np.float32).tobytes(), v["first"], v["last"], v["visits"])
         except Exception as e:
             log.debug("visitor not saved: %s", e)
+
+
+# ---------------------------------------------------------------- one walk-in per person
+# Measured on 17 Oct with 281 shop snapshots of 12-13 Oct: 145 pairs of people in the same frame (certainly two people)
+# against 159 same-person pairs (next snapshot, same spot). Embedding cosine alone at 0.90 matched 13 % of the
+# different-people pairs; the colour histogram separates far better, and both together at 0.90 / 0.60 kept 95 % of
+# the same-person pairs and matched none of the 145 different ones. Real returns (other pose, other light) score
+# lower than those same-person pairs, so some returns are counted again: the rule errs towards counting.
+REVISIT_SIMILARITY = 0.90            # cosine of the mean embeddings
+REVISIT_COLOUR = 0.60                # and colour similarity of upper and lower body (1 - Bhattacharyya distance)
+REVISIT_MARGIN = 0.03                # and clearly closer than the next leaver: two look-alikes leave it a new walk-in
+COLOUR_BINS = [12, 4, 4]             # HSV histogram per body half
+
+
+def colour_signature(frame: np.ndarray, bbox: tuple) -> np.ndarray | None:
+    """Normalised HSV histograms of the upper and the lower half of a person box, stacked (2 x 192)."""
+    x1, y1, x2, y2 = (int(v) for v in bbox)
+    crop = frame[max(0, y1):min(frame.shape[0], y2), max(0, x1):min(frame.shape[1], x2)]
+    if crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 8:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    half = hsv.shape[0] // 2
+    out = []
+    for part in (hsv[:half], hsv[half:]):
+        h = cv2.calcHist([part], [0, 1, 2], None, COLOUR_BINS, [0, 180, 0, 256, 0, 256]).flatten()
+        out.append(h / (h.sum() or 1.0))
+    return np.stack(out).astype(np.float32)
+
+
+def colour_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.mean([1.0 - cv2.compareHist(x, y, cv2.HISTCMP_BHATTACHARYYA) for x, y in zip(a, b)]))
+
+
+class RevisitGate:
+    """Customers who left through the door recently, shared by the store's cameras (thread-safe). Someone walking in
+    who looks like one of them is that person coming back: the same walk-in, not a new one.
+
+    Deliberately small and short-lived: a newcomer is compared with the few people who went out in the last
+    reentry_minutes, not with a whole day's gallery, so the weak ImageNet features rarely meet a look-alike. Any doubt
+    (below REVISIT_SIMILARITY, or two leavers nearly as close) counts the person as a new walk-in, as before."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._left: list[dict] = []
+        self.remembered = 0
+        self.matched = 0
+        self.ambiguous = 0
+
+    def remember(self, emb: np.ndarray, colour: np.ndarray, ts: float, cam: str, track: int, exited: bool,
+                 visitor: str | None) -> None:
+        with self._lock:
+            self._left.append({"emb": emb.astype(np.float32), "colour": colour.astype(np.float32), "ts": ts,
+                               "cam": cam, "track": track,
+                               "exited": exited, "visitor": visitor})
+            del self._left[:-200]
+            self.remembered += 1
+
+    def waiting(self, now: float, window: float) -> bool:
+        """Is anybody who could be coming back right now on the list?"""
+        with self._lock:
+            return any(0.0 <= now - v["ts"] <= window for v in self._left)
+
+    def match(self, emb: np.ndarray, colour: np.ndarray, now: float, window: float) -> dict | None:
+        """The leaver this newcomer is, or None. A match is taken off the list (one return per departure)."""
+        with self._lock:
+            self._left = [v for v in self._left if now - v["ts"] <= window]
+            scored = []
+            for i, v in enumerate(self._left):
+                if v["ts"] > now:
+                    continue
+                s, c = float(np.dot(v["emb"], emb)), colour_similarity(v["colour"], colour)
+                if s >= REVISIT_SIMILARITY and c >= REVISIT_COLOUR:
+                    scored.append((s + c, s, c, i))
+            if not scored:
+                return None
+            scored.sort(reverse=True)
+            if len(scored) > 1 and scored[0][0] - scored[1][0] < REVISIT_MARGIN:
+                self.ambiguous += 1
+                return None
+            _, s, c, i = scored[0]
+            v = self._left.pop(i)
+            self.matched += 1
+            return {**v, "similarity": s, "colour_similarity": c}
+
+    def stats(self, now: float | None = None) -> dict:
+        with self._lock:
+            return {"waiting": len(self._left), "remembered": self.remembered, "matched": self.matched,
+                    "ambiguous": self.ambiguous}

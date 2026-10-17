@@ -277,6 +277,7 @@ class Store:
         ins = [c for c in crossings if c["direction"] == "in"]
         outs = [c for c in crossings if c["direction"] == "out"]
         passes = [c for c in crossings if c["direction"] == "pass"]
+        returns = sum(1 for c in crossings if c["direction"] == "return_in")    # same person back in: not a walk-in
         has_line = bool(ins or outs)
         walk_ins = len(ins) if has_line else len(visits)
         groups = len({c["group_id"] for c in ins}) if has_line else len({v["group_id"] or f"v{i}" for i, v in enumerate(visits)})
@@ -313,7 +314,7 @@ class Store:
         conversion = round(sales["bills"] / walk_ins * 100, 1) if walk_ins and sales["bills"] else None
         return {
             "since": since, "until": until, "has_line": has_line,
-            "walk_ins": walk_ins, "by_brand": _by_brand(visits), "passby": len(passes), "capture_rate_pct": round(100.0 * walk_ins / len(passes), 1) if passes else None, "groups": groups, "exits": len(outs),
+            "walk_ins": walk_ins, "by_brand": _by_brand(visits), "passby": len(passes), "capture_rate_pct": round(100.0 * walk_ins / len(passes), 1) if passes else None, "groups": groups, "exits": len(outs), "returns": returns,
             "visits": len(visits), "engaged": engaged, "bounced": bounced,
             "engaged_pct": round(engaged / len(visits) * 100, 1) if visits else 0.0,
             "avg_dwell": round(avg_dwell, 1),

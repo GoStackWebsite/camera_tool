@@ -178,6 +178,7 @@ class Thresholds:
     line_cooldown_seconds: float = 1.5  # count line: minimum gap between two crossings of the same person
     serve_seconds: float = 20.0       # a customer attended this long by one brand's staff is that brand's walk-in
     demo_share: float = 0.5           # staff phone episode with a customer nearby for this share of it = product demo
+    reentry_minutes: float = 30.0     # a customer who comes back in within this many minutes is the same walk-in (0 = count every entry)
 
 
 @dataclass

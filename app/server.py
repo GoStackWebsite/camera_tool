@@ -449,6 +449,8 @@ async def put_thresholds(body: dict):
               "phone_seconds", "staff_zone_seconds", "group_window"):
         if getattr(thr, k) <= 0:
             raise HTTPException(422, f"{k} must be positive")
+    if thr.reentry_minutes < 0:
+        raise HTTPException(422, "reentry_minutes must be 0 or more")
     if thr.line_margin < 0 or thr.line_cooldown_seconds < 0:
         raise HTTPException(422, "line_margin and line_cooldown_seconds must be 0 or more")
     if int(thr.line_min_frames) < 1:

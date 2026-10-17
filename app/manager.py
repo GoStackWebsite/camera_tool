@@ -16,6 +16,7 @@ from .analytics import Analytics
 from .camera import RTSPCamera
 from .config import DATA_DIR, MODELS_DIR, AppConfig, CameraConfig, ConfigStore, Settings, StaffConfig, Thresholds, mask_url
 from .fusion import StoreFusion
+from .reid import Embedder, RevisitGate
 from .demographics import Demographics
 from .staffcls import BrandClassifier, StaffClassifier
 from .detector import PersonTracker
@@ -59,6 +60,7 @@ class Manager:
                            "report_sent": False, "closed_fired": False}
         self._health_thread = threading.Thread(target=self._health_loop, name="health", daemon=True)
         self.fusion = StoreFusion(DATA_DIR / "fusion.json")    # cameras that see the same floor: one person, one id
+        self.revisits = RevisitGate()          # customers who left recently: coming back is not a new walk-in
         self._fusion_thread = threading.Thread(target=self._fusion_loop, name="fusion", daemon=True)
         self.report_builder = None   # set by server (avoids circular import)
         self.connector = None        # Congruence Eye connector (set by server)
@@ -104,6 +106,8 @@ class Manager:
         brand_model = BrandClassifier.create(MODELS_DIR)      # learned brand of the uniform, when models/brand_cls.pt exists
         analytics = Analytics(cam, self.config.thresholds, self.store, self.alerts, self.config.staff, staff_model, brand_model)
         analytics.fusion = self.fusion
+        analytics.revisits = self.revisits
+        analytics.embedder = Embedder.create(MODELS_DIR)    # appearance samples for recognising someone coming back
         demographics = Demographics.create(MODELS_DIR) if self.config.demographics.enabled else None
         pipeline = Pipeline(camera, tracker, analytics, self.settings, cam.target_fps, demographics, self.config_store)
         rt = CameraRuntime(cam, camera, tracker, analytics, pipeline, time.time())

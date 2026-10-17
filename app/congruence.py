@@ -269,6 +269,11 @@ class CongruenceConnector:
         # one visitor id per person and store: a track linked to the overview camera's track (store fusion) uses that id,
         # so the server joins what both cameras saw into one visit
         vid = f"{t.store_cam}-{self.session_id}-{t.store_id}" if getattr(t, "store_id", None) and getattr(t, "store_cam", "") else tid
+        if hasattr(t, "visitor_key"):          # someone recognised as coming back keeps the earlier visit's id
+            if t.visitor_key:
+                vid = t.visitor_key
+            elif not getattr(t, "store_id", None):
+                t.visitor_key = vid
         if zone is not None and hasattr(t, "zone_vid"):
             if etype == "ZONE_ENTER":
                 t.zone_vid[zone] = vid
