@@ -306,6 +306,10 @@ class Analytics:
             self.staff_exits = 0
             self.reentries = 0              # customers back in within reentry_minutes: not new walk-ins
             self.reexits = 0
+            # exits counted for customers who then came back in: their next way out is not a new exit. One per return,
+            # whichever track carries that person out (the tracker often gives them a new number on the way), so that
+            # over the day walk-ins and exits balance: a return removes one walk-in and one exit, not just the walk-in
+            self.return_credits = 0
             self.passby = 0
             self.groups_in = 0
             self.unique_ids: set[int] = set(self.tracks.keys())
@@ -804,7 +808,8 @@ class Analytics:
                 if t.pending_entry is not None:
                     self._book_entry(t)              # stepped in and straight out: keep the order ENTRY, EXIT
                 self._event(now, "line_out", t.id, f"Person #{t.id} crossed OUT")
-                if not t.is_staff and self._repeat_exit(t, now):
+                if not t.is_staff and self._offsets_return(t, now):
+                    self.return_credits -= 1
                     self.reexits += 1                # their way out is counted already: no second EXIT
                     self._event(now, "reexit", t.id, f"Person #{t.id} went out again: exit already counted")
                     self._record_crossing(now, "return_out", t)
@@ -844,6 +849,8 @@ class Analytics:
             why = self._repeat_entry(t, ts)
             if why:                              # the same person again: no walk-in, no ENTRY for Congruence Eye
                 self.reentries += 1
+                if t.out_booked:                 # and their way out was counted: the next one is not a new exit
+                    self.return_credits += 1
                 self._event(ts, "reentry", t.id, f"Person #{t.id} came back in ({why}): same walk-in")
                 self._record_crossing(ts, "return_in", t)
                 return
@@ -868,6 +875,8 @@ class Analytics:
             return False
         if t.in_booked and t.pending_entry is not None and t.pending_entry - t.in_ts <= self.reentry_window:
             return False                         # crossed in again: decided without looking
+        if not t.in_booked and t.out_booked and t.pending_entry is not None and t.pending_entry - t.out_ts <= self.reentry_window:
+            return False                         # went out and straight back in on the same track: the same
         return self.revisits.waiting(t.pending_entry if t.pending_entry is not None else now, self.reentry_window)
 
     def _sample_reid(self, t: Track, frame: np.ndarray, now: float) -> None:
@@ -907,6 +916,9 @@ class Analytics:
             return ""
         if t.in_booked and ts - t.in_ts <= win:
             return f"crossed in again {(ts - t.in_ts) / 60:.0f} min after coming in"
+        if not t.in_booked and t.out_booked and ts - t.out_ts <= win:
+            # a track that began inside (its walk-in is on an earlier number), went out and is back: the same person
+            return f"came back in {(ts - t.out_ts) / 60:.0f} min after going out"
         if t.in_booked or not self._reid_active():
             return ""
         look = self._reid_mean(t)
@@ -925,6 +937,16 @@ class Analytics:
     def _repeat_exit(self, t: Track, now: float) -> bool:
         """A customer whose way out has been counted already (on this visit, or the earlier one they came back from)."""
         return self.reentry_window > 0 and t.out_booked and now - t.out_ts <= self.reentry_window
+
+    def _offsets_return(self, t: Track, now: float) -> bool:
+        """Is this customer's way out the second one of someone who came back in (so not a new exit)?
+
+        Only while a return is still open (return_credits), and only for a track that is that returner, or that
+        could be: one without a walk-in of its own (it began inside the shop under a new number). A track that came
+        in through the door as a new walk-in is leaving for the first time and its exit counts."""
+        if self.return_credits <= 0:
+            return False
+        return self._repeat_exit(t, now) or not t.in_booked
 
     def _remember_leaver(self, t: Track) -> None:
         """A customer who went out through the door goes on the store's list of recent leavers."""

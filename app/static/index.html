@@ -968,7 +968,7 @@
     } catch (e) { toast('Load failed: ' + e.message); }
   }
   function renderDashboardTraffic(t) {
-    $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` + (t.returns ? ` · ${t.returns} came back (not counted again)` : '') : 'no line crossings yet: counting visits';
+    $('#kWalk').textContent = t.walk_ins; $('#kWalkSub').textContent = t.has_line ? `${t.groups} groups · ${t.exits} exits` + (t.returns ? ` · ${t.returns} came back (not counted again)` : '') + (t.door_in !== undefined && (t.door_in || t.door_out) ? ` · door ${t.door_in} in / ${t.door_out} out` : '') : 'no line crossings yet: counting visits';
     $('#kEng').textContent = t.engaged_pct + '%'; $('#kEngSub').textContent = `${t.engaged} engaged · ${t.bounced} bounced`;
     $('#kDwell').textContent = t.avg_dwell ? fmtDur(t.avg_dwell) : '–';
     $('#kConv').textContent = t.conversion === null ? '–' : t.conversion + '%'; $('#kConvSub').textContent = t.conversion === null ? 'enter bills in Settings or connect the POS' : `${t.sales.bills} bills`;

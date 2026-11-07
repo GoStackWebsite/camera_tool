@@ -240,6 +240,67 @@ t = stay(an, 60, 0.40, INSIDE, t, 2.0)
 check("staff in-out-in: two staff entries, no walk-ins", an.staff_entries == 2 and an.entries == 0 and an.reentries == 0,
       f"staff_entries={an.staff_entries} entries={an.entries}")
 
+print("== came back, then left under a new track number")
+an = make()
+t = walk(an, 80, 0.40, OUTSIDE, INSIDE, 0.0, look=A_LOOK)
+t = stay(an, 80, 0.40, INSIDE, t, 4.0, look=A_LOOK)
+t = walk(an, 80, 0.40, INSIDE, OUTSIDE, t, look=A_LOOK)
+t = gone(an, t)
+t = walk(an, 81, 0.40, OUTSIDE, INSIDE, t + 60.0, look=near(A_LOOK, 0.95, 9))
+t = stay(an, 81, 0.40, INSIDE, t, 3.0, look=near(A_LOOK, 0.95, 9))
+t = gone(an, t, 6.0)                                        # the tracker loses them in the shop
+t = stay(an, 82, 0.85, INSIDE, t, 2.0)                      # found again far away under a new number
+t = walk(an, 82, 0.85, INSIDE, OUTSIDE, t)
+t = stay(an, 82, 0.85, OUTSIDE, t, 2.0)
+check("one walk-in, one exit", an.entries == 1 and an.exits == 1 and an.reentries == 1 and an.reexits == 1,
+      f"entries={an.entries} exits={an.exits} reentries={an.reentries} reexits={an.reexits}")
+check("Congruence Eye gets one ENTRY and one EXIT", an.emitter.count("ENTRY") == 1 and an.emitter.count("EXIT") == 1, str(an.emitter.sent))
+check("no return left open", an.return_credits == 0, f"open={an.return_credits}")
+
+print("== a new walk-in leaves while someone who came back is still inside")
+an = make()
+t = walk(an, 90, 0.40, OUTSIDE, INSIDE, 0.0, look=A_LOOK)
+t = stay(an, 90, 0.40, INSIDE, t, 4.0, look=A_LOOK)
+t = walk(an, 90, 0.40, INSIDE, OUTSIDE, t, look=A_LOOK)
+t = gone(an, t)
+t = walk(an, 91, 0.40, OUTSIDE, INSIDE, t + 60.0, look=near(A_LOOK, 0.95, 11))     # A comes back
+t = stay(an, 91, 0.40, INSIDE, t, 3.0, look=near(A_LOOK, 0.95, 11))
+t = walk(an, 92, 0.75, OUTSIDE, INSIDE, t, look=B_LOOK)                            # B walks in ...
+for _ in range(30):                                                                # ... both inside a while
+    an.update([det(91, 0.40, INSIDE), det(92, 0.75, INSIDE)], W, H, t, None, FRAME)
+    t += 0.1
+for i in range(31):                                                                # B walks out, A stays
+    an.update([det(91, 0.40, INSIDE), det(92, 0.75, INSIDE + (OUTSIDE - INSIDE) * i / 30)], W, H, t, None, FRAME)
+    t += 0.1
+mid = an.exits
+t = stay(an, 91, 0.40, INSIDE, t, 3.0)
+t = walk(an, 91, 0.40, INSIDE, OUTSIDE, t)                                         # A leaves again
+t = stay(an, 91, 0.40, OUTSIDE, t, 2.0)
+check("the newcomer's way out counts", mid == 2, f"exits after B left={mid}")
+check("two walk-ins, two exits", an.entries == 2 and an.exits == 2, f"entries={an.entries} exits={an.exits}")
+
+print("== began inside, out of the door and straight back in")
+an = make()
+t = stay(an, 95, 0.40, INSIDE, 0.0, 2.0)                    # a track that starts in the shop (walk-in on an older number)
+t = walk(an, 95, 0.40, INSIDE, OUTSIDE, t)
+t = stay(an, 95, 0.40, OUTSIDE, t, 2.0)
+t = walk(an, 95, 0.40, OUTSIDE, INSIDE, t)
+t = stay(an, 95, 0.40, INSIDE, t, A.REVISIT_HOLD_SECONDS + 1.0)
+t = walk(an, 95, 0.40, INSIDE, OUTSIDE, t)
+t = stay(an, 95, 0.40, OUTSIDE, t, 2.0)
+check("no walk-in, one exit", an.entries == 0 and an.exits == 1 and an.reentries == 1,
+      f"entries={an.entries} exits={an.exits} reentries={an.reentries}")
+check("the event says why", any(e["type"] == "reentry" and "after going out" in e["message"] for e in an.events))
+
+print("== came back, but their way out had not been seen")
+an = make()
+an.revisits.remember(A_LOOK, RED_BLUE, 10.0, "door", 97, False, "door-s-97")      # lost outside, no OUT crossing
+t = walk(an, 98, 0.40, OUTSIDE, INSIDE, 70.0, look=near(A_LOOK, 0.95, 13))
+t = stay(an, 98, 0.40, INSIDE, t, 3.0, look=near(A_LOOK, 0.95, 13))
+t = walk(an, 98, 0.40, INSIDE, OUTSIDE, t)
+t = stay(an, 98, 0.40, OUTSIDE, t, 2.0)
+check("recognised, and their one way out counts", an.reentries == 1 and an.exits == 1, f"reentries={an.reentries} exits={an.exits}")
+
 print("== switched off (reentry_minutes = 0)")
 an = make(minutes=0.0)
 t = walk(an, 70, 0.40, OUTSIDE, INSIDE, 0.0, look=A_LOOK)
