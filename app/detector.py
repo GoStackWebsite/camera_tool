@@ -8,10 +8,10 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from .config import BASE_DIR
+from .config import RESOURCE_DIR
 
 log = logging.getLogger("detector")
-TRACKER_CFG = BASE_DIR / "app" / "tracker.yaml"
+TRACKER_CFG = RESOURCE_DIR / "app" / "tracker.yaml"
 PERSON_CLASS = 0
 PHONE_CLASS = 67   # COCO "cell phone"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -13,9 +14,11 @@ from dotenv import load_dotenv
 
 log = logging.getLogger("config")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+RESOURCE_DIR = Path(__file__).resolve().parent.parent    # read-only files that ship with the code
+# the packaged exe (tools\build_exe.ps1) keeps .env, data and models beside the exe, not in its _internal folder
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else RESOURCE_DIR
 DATA_DIR = BASE_DIR / "data"
-STATIC_DIR = BASE_DIR / "app" / "static"
+STATIC_DIR = RESOURCE_DIR / "app" / "static"
 MODELS_DIR = BASE_DIR / "models"
 DATA_DIR.mkdir(exist_ok=True)
 

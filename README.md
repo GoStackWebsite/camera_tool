@@ -83,6 +83,18 @@ available; keep the PC logged on) and a desktop shortcut **Congruence Eye** that
 <http://localhost:3000>. Other actions: `start` (foreground supervisor), `stop`, `status`, `uninstall`.
 Supervisor log: `logs\stack.log`; server output: `logs\ce.out.log`.
 
+### Package the camera engine as an exe
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_exe.ps1
+```
+
+builds `dist\CameraEngine\CameraEngine.exe`: this engine only, without Congruence Eye, and no Python needed on
+the target PC. Copy the whole `CameraEngine` folder, the exe does not run without `_internal` beside it.
+Double-click starts it and opens the dashboard; closing the console window stops it. Cameras are added under
+Settings → Cameras. `.env`, `data\`, `logs\` and `models\` sit beside the exe, so a store model can be swapped
+without a rebuild. The build takes nothing from `.env` or `data\` of this PC.
+
 ## First-time configuration (5 minutes)
 
 1. **Dashboard → click the camera** to open it.

@@ -26,8 +26,9 @@ data/*.jpg
 # downloaded ONNX models (fetched by app/demographics.py on first run)
 models/*.onnx
 
-# packaged source archives
+# packaged source archives and the exe build (tools\build_exe.ps1)
 dist/
+build/
 
 # training data and runs (large, store specific)
 datasets/staff/
