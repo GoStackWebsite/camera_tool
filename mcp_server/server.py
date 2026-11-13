@@ -849,8 +849,9 @@ def feature_audit() -> Dict[str, Any]:
         {"managed": cg.get("managed"), "online": conn.get("online"), "snapshot_seconds": cg.get("snapshot_seconds"),
          "heartbeat_seconds": cg.get("heartbeat_seconds"), "mapped_cameras": conn.get("mapped_cameras"), "mapped_zones": conn.get("mapped_zones"),
          "backlog": conn.get("backlog"), "last_error": conn.get("last_error")})
-    add("engine", "face blurring", "enabled" if cams and all(c["blur_faces"] for c in cams) else ("partial" if any(c["blur_faces"] for c in cams) else "disabled"),
-        {c["id"]: c["blur_faces"] for c in cams})
+    # app/pipeline.py FACE_BLUR switches blur off engine-wide for now; the per-camera flags only apply once it is on
+    add("engine", "face blurring", "disabled (off engine-wide, app/pipeline.py FACE_BLUR)",
+        {"per_camera_setting_kept": {c["id"]: c["blur_faces"] for c in cams}})
     add("engine", "detector model", "configured" if health.get("model") else "MISSING", health.get("model"))
 
     # ---- Congruence Eye

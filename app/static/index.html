@@ -151,6 +151,19 @@
             <button id="btnEdSwap" style="display:none" title="Walking the other way across the line counts as IN">Swap IN/OUT</button><button id="btnEdDelLine" style="display:none" class="danger">Remove line</button><button id="btnEdAddLine" style="display:none" title="Put a count line in the middle of the picture, then drag it to the door">Add count line</button>
             <button id="btnEdSave" style="display:none" class="primary">Save changes</button><button id="btnEdCancel" style="display:none">Cancel</button>
             <span class="sep"></span><button id="btnClearLine">Clear line</button><button id="btnClearZones">Clear zones</button>
+            <button id="btnFloor" title="Calibrate this camera to the shop floor (tile corners), so people seen by two cameras are linked by where they stand">Floor plan</button>
+          </div>
+          <div class="toolbar" id="floorBar" style="display:none">
+            <label class="hint" title="All cameras share it">1 tile = <input id="flUnit" type="number" min="0.05" max="10" step="0.01" style="width:70px"> m</label>
+            <span class="sep"></span>
+            <span class="hint" id="flSelLabel">Mark</span>
+            <label class="hint">X <input id="flX" type="number" step="0.5" style="width:64px" title="Floor position across, in tiles from the 0,0 corner"></label>
+            <label class="hint">Y <input id="flY" type="number" step="0.5" style="width:64px" title="Floor position along, in tiles from the 0,0 corner"></label>
+            <button id="flDel" title="Remove the selected mark (Delete key)">Remove mark</button>
+            <span class="sep"></span>
+            <label class="hint"><input id="flPeople" type="checkbox" checked> other cameras' people</label>
+            <button id="flSave" class="primary">Save floor plan</button><button id="flClose">Close</button>
+            <span class="hint" id="flStat" style="flex-basis:100%"></span>
           </div>
           <form class="toolbar" id="ceSign" style="display:none">
             <span class="hint" id="ceSignMsg" style="flex-basis:100%"></span>
@@ -262,7 +275,7 @@
         <label class="wide">RTSP URL<input name="url" placeholder="rtsp://10.0.0.93:554/streaming/channels/1501"></label>
         <label>Username<input name="user"></label><label>Password<input name="password" type="password"></label>
         <label>Max analysis fps (0 = default)<input name="target_fps" type="number" min="0" max="60" step="1" value="0"></label>
-        <label class="check"><input name="enabled" type="checkbox" checked>Enabled</label><label class="check"><input name="blur_faces" type="checkbox" checked>Blur faces in streams & snapshots</label>
+        <label class="check"><input name="enabled" type="checkbox" checked>Enabled</label><label class="check"><input name="blur_faces" type="checkbox" checked>Blur faces in streams & snapshots (off engine-wide for now)</label>
         <div class="toolbar wide" style="grid-column:1/-1"><button type="button" id="btnTestCam">Test connection</button><button type="submit" class="primary">Save camera</button><button type="button" id="btnCamCancel">Cancel</button><span class="hint" id="camTestResult"></span></div>
       </form></div>
     <div class="card mt"><h2>Thresholds</h2>
@@ -360,6 +373,7 @@
   let CFG = {store: {}, cameras: [], thresholds: {}, notifications: {}, report: {}};
   let S = null, cfgRevs = {}, rangeHours = 0, tab = 'dashboard';
   let detailCam = null, mode = 'annotated', heat = false, drawMode = null, drawPts = [], ed = null, cePending = null;
+  let fl = null, flTimer = null, flLive = null;      // floor plan calibration mode (see "floor plan (camera view)")
   let traffic = null, lastHist = 0;
 
   // ------------------------------------------------------------ tabs + range
@@ -432,11 +446,12 @@
   }
   function openDetail(id) {
     if (ed) { if (id === detailCam) return; if (!stopEdit(false)) return; }
+    if (fl) { if (id === detailCam) return; if (!stopFloor(false)) return; }
     detailCam = id; $('#camDetail').style.display = ''; setVideo(); endDraw();
     $('#camDetail').scrollIntoView({behavior: 'smooth', block: 'start'});
     if (S && S.cameras[id]) { renderDetail(S.cameras[id]); }
   }
-  function closeDetail() { if (ed && !stopEdit(false)) return; detailCam = null; $('#camDetail').style.display = 'none'; $('#detVideo').src = ''; }
+  function closeDetail() { if (ed && !stopEdit(false)) return; if (fl && !stopFloor(false)) return; detailCam = null; $('#camDetail').style.display = 'none'; $('#detVideo').src = ''; }
   $('#detClose').onclick = closeDetail;
   const camCfg = () => CFG.cameras.find(c => c.id === detailCam) || {zones: [], line: null};
   function setVideo() { if (!detailCam) return; $('#detVideo').src = `/video/${detailCam}?mode=${mode}&heat=${heat ? 1 : 0}&t=${Date.now()}`; $('#btnSnap').href = `/snapshot/${detailCam}.jpg?mode=${mode}&heat=${heat ? 1 : 0}`; }
@@ -445,15 +460,15 @@
   $('#btnHeat').onclick = () => { heat = !heat; $('#btnHeat').classList.toggle('active', heat); setVideo(); };
   function renderDetail(c) {
     $('#detTitle').textContent = `${c.name} · ${c.camera.connected ? `${c.camera.width}×${c.camera.height} @ ${c.camera.fps} fps · AI ${c.inference.fps} fps` : (c.camera.error || 'connecting…')}`;
-    $('#dOcc').textContent = c.occupancy; $('#dStaff').textContent = c.staff; $('#dInOut').textContent = `${c.entries} / ${c.exits}`;
-    $('#dGroups').textContent = c.has_line ? `${c.groups_in} groups` : 'no count line'; $('#dDwell').textContent = c.avg_dwell ? fmtDur(c.avg_dwell) : '–';
+    $('#dOcc').textContent = c.occupancy; $('#dStaff').textContent = c.staff; $('#dInOut').textContent = `${c.entries}${c.pending_in ? ' +' + c.pending_in : ''} / ${c.exits}`;
+    $('#dGroups').textContent = c.has_line ? `${c.groups_in} groups` + (c.pending_in ? ` · ${c.pending_in} being identified` : '') + (c.reentries ? ` · ${c.reentries} came back (same walk-in)` : '') + (c.door_in !== undefined ? ` · door ${c.door_in} in / ${c.door_out} out` : '') : 'no count line'; $('#dDwell').textContent = c.avg_dwell ? fmtDur(c.avg_dwell) : '–';
     renderZoneRows(c); renderTracks(c.tracks);
   }
   function renderZoneRows(c) {
     const tb = $('#zoneRows'); tb.innerHTML = ''; const cfg = camCfg(); const stats = (c && c.zones) || [];
     const managed = !!cfg.managed;
     renderTools();
-    if (!drawMode && !ed) $('#drawHint').textContent = defaultHint();
+    if (!drawMode && !ed && !fl) $('#drawHint').textContent = defaultHint();
     if (!cfg.zones.length) { const tr = document.createElement('tr'); const td = text(tr, 'td', 'No zones yet. Use "Draw zone".', 'hint'); td.colSpan = 7; tb.appendChild(tr); return; }
     for (const z of cfg.zones) {
       const st = stats.find(x => x.name === z.name) || {count: 0, staff: 0, visits: 0, avg_dwell: 0};
@@ -490,12 +505,13 @@
   const toNorm = (px, py) => { const f = frameRect(); return [Math.min(1, Math.max(0, (px - f.x) / f.w)), Math.min(1, Math.max(0, (py - f.y) / f.h))]; };
   const toPx = (nx, ny) => { const f = frameRect(); return [f.x + nx * f.w, f.y + ny * f.h]; };
   function drawOverlay() {
-    const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); if (ed) { drawEditor(ctx); return; } if (!drawMode) return;
+    const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); if (fl) { drawFloor(ctx); return; } if (ed) { drawEditor(ctx); return; } if (!drawMode) return;
     ctx.lineWidth = 2; ctx.strokeStyle = '#ffd400'; ctx.fillStyle = '#ffd400'; const pts = drawPts.map(p => toPx(p[0], p[1]));
     if (pts.length) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); if (drawMode === 'zone' && pts.length > 2) ctx.closePath(); ctx.stroke(); pts.forEach(p => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill(); }); }
   }
   function startDraw(kind) {
     if (ed && !stopEdit(false)) return;
+    if (fl && !stopFloor(false)) return;
     drawMode = kind; drawPts = []; overlay.classList.add('drawing');
     if (kind === 'zone') { roleOptions($('#zoneRole'), 'display'); checkCeSession(); }
     ['#btnFinish', '#zoneName', '#zoneRole'].forEach(s => $(s).style.display = kind === 'zone' ? '' : 'none'); $('#btnCancel').style.display = '';
@@ -561,10 +577,11 @@
     if (current) sel.value = current;
   }
   function renderTools() {
-    const managed = !!camCfg().managed, editing = !!ed;
+    const managed = !!camCfg().managed, editing = !!ed, floor = !!fl;
     const show = (sel, on) => { const e = $(sel); if (e) e.style.display = on ? '' : 'none'; };
-    ['#btnLine', '#btnSwap', '#btnClearLine', '#btnClearZones'].forEach(sel => show(sel, !managed && !editing));
-    show('#btnZone', !editing); show('#btnEdit', !drawMode); show('#btnEdLine', !drawMode && !editing);
+    ['#btnLine', '#btnSwap', '#btnClearLine', '#btnClearZones'].forEach(sel => show(sel, !managed && !editing && !floor));
+    show('#btnZone', !editing && !floor); show('#btnEdit', !drawMode && !floor); show('#btnEdLine', !drawMode && !editing && !floor);
+    show('#btnFloor', !drawMode && !editing);
   }
 
   // ---- talking to the server
@@ -658,6 +675,7 @@
   function startEdit(selName, opts = {}) {
     if (ed) { if (opts.line) selectLine(); else if (selName) { ed.sel = ed.zones.findIndex(z => z.orig === selName); ed.vtx = -1; renderEditBar(); drawOverlay(); } return; }
     if (drawMode) endDraw();
+    if (fl && !stopFloor(false)) return;
     const c = camCfg();
     if (!c.zones.length && !c.line && !opts.line) { toast('There are no zones on this camera yet. Use "Draw zone" first.'); return; }
     ed = {zones: c.zones.map(z => ({orig: z.name, origRole: z.role, name: z.name, role: z.role, geo: false, points: z.points.map(p => [clamp01(p[0]), clamp01(p[1])])})), removed: [], sel: -1, vtx: -1, drag: null, prevMode: mode,
@@ -867,7 +885,174 @@
     await go();
   };
 
-  // ------------------------------------------------------------ alerts + events
+  // ------------------------------------------------------------ floor plan (camera view)
+  // Marks: a point on the picture at floor level (a tile corner) and where it is on the floor, in tiles from one
+  // corner that every camera uses as 0,0. Four or more fix where every picture point is on the floor (app/floor.py);
+  // the tile grid drawn over the picture shows whether the fit is right, and the people the other cameras see are
+  // drawn where the floor plan puts them, so their circles must sit on the same people's feet here.
+  const FLOOR_HINT = 'Pick one tile corner that every camera can see as 0,0. Click a tile corner on the floor and type its position in tiles (X across, Y along); add at least 4, spread over the floor, and a 5th to check the fit. Drag a mark to move it. The grid must follow the tiles; then Save floor plan and do the same on the other camera with the same 0,0.';
+  // floor (metres) -> picture (fractions) from >= 4 complete marks: least squares, h33 = 1 (Gaussian elimination)
+  function flFit(marks, unit) {
+    const P = marks.filter(m => Number.isFinite(m.floor[0]) && Number.isFinite(m.floor[1]));
+    if (P.length < 4) return null;
+    const N = 8, M = Array.from({length: N}, () => new Array(N + 1).fill(0));
+    for (const m of P) {
+      const X = m.floor[0] * unit, Y = m.floor[1] * unit, [x, y] = m.img;
+      for (const [row, rhs] of [[[X, Y, 1, 0, 0, 0, -x * X, -x * Y], x], [[0, 0, 0, X, Y, 1, -y * X, -y * Y], y]]) {
+        for (let i = 0; i < N; i++) { for (let j = 0; j < N; j++) M[i][j] += row[i] * row[j]; M[i][N] += row[i] * rhs; }
+      }
+    }
+    for (let c = 0; c < N; c++) {
+      let piv = c; for (let r = c + 1; r < N; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (Math.abs(M[piv][c]) < 1e-12) return null;
+      [M[c], M[piv]] = [M[piv], M[c]];
+      for (let r = 0; r < N; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= N; k++) M[r][k] -= f * M[c][k]; }
+    }
+    const h = M.map((row, i) => row[N] / row[i]);
+    return [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]];
+  }
+  const flProj = (Hm, X, Y) => { const w = Hm[2][0] * X + Hm[2][1] * Y + Hm[2][2]; return w > 1e-9 ? [(Hm[0][0] * X + Hm[0][1] * Y + Hm[0][2]) / w, (Hm[1][0] * X + Hm[1][1] * Y + Hm[1][2]) / w] : null; };
+  const flUnit = () => { const u = parseFloat($('#flUnit').value); return u > 0 ? u : 0.6; };
+  const flDirty = () => !!fl && (JSON.stringify(fl.marks) !== fl.orig || flUnit() !== fl.origUnit);
+  async function startFloor() {
+    if (ed && !stopEdit(false)) return;
+    if (drawMode) endDraw();
+    let st; try { st = await api('/api/floor'); } catch (e) { toast('Could not load the floor plan: ' + e.message); return; }
+    const c = (st.cameras || {})[detailCam] || {points: []};
+    fl = {marks: c.points.map(p => ({img: [...p.img], floor: [...p.floor]})), sel: -1, drag: null, prevMode: mode, status: c, all: st};
+    fl.orig = JSON.stringify(fl.marks); fl.origUnit = st.unit_m; $('#flUnit').value = st.unit_m;
+    if (mode !== 'raw') setMode('raw');
+    overlay.classList.add('editing'); $('#floorBar').style.display = ''; $('#btnFloor').classList.add('active');
+    $('#drawHint').textContent = FLOOR_HINT; renderTools(); renderFloorBar(); drawOverlay();
+    flTimer = setInterval(async () => { if (!fl) return; try { flLive = await api('/api/floor/live'); drawOverlay(); } catch (e) { /* engine busy: try again */ } }, 1000);
+  }
+  function stopFloor(force) {
+    if (!fl) return true;
+    if (!force && flDirty() && !confirm('Discard the floor plan changes that have not been saved?')) return false;
+    const prev = fl.prevMode; fl = null; flLive = null; clearInterval(flTimer); flTimer = null;
+    overlay.classList.remove('editing'); overlay.style.cursor = ''; $('#floorBar').style.display = 'none'; $('#btnFloor').classList.remove('active');
+    if (prev !== mode && detailCam) setMode(prev);
+    $('#drawHint').textContent = defaultHint(); renderTools(); drawOverlay();
+    return true;
+  }
+  function flStatusText() {
+    const s = fl.status || {}, n = fl.marks.length, done = fl.marks.filter(m => Number.isFinite(m.floor[0]) && Number.isFinite(m.floor[1])).length;
+    const parts = [`${n} mark${n === 1 ? '' : 's'}` + (done < n ? `, ${n - done} without a floor position` : '')];
+    if (flDirty()) parts.push('not saved');
+    else if (s.ok) parts.push(s.checked ? `saved · accuracy ${Math.round(s.error_m * 100)} cm on average, worst mark ${s.worst + 1}: ${Math.round(s.max_error_m * 100)} cm` + (s.good ? '' : ' (too far off: check the floor positions)') : 'saved · add a 5th mark to check the accuracy');
+    else if (s.message) parts.push(s.message);
+    const others = Object.entries((fl.all && fl.all.cameras) || {}).filter(([c, v]) => c !== detailCam && v.ok).map(([c]) => (CFG.cameras.find(x => x.id === c) || {name: c}).name);
+    parts.push(others.length ? `also calibrated: ${others.join(', ')}` : 'no other camera calibrated yet: people are linked by floor position once two cameras are');
+    return parts.join(' · ');
+  }
+  // force: the selection changed, so the X / Y boxes show the newly selected mark even if one of them has the focus
+  function renderFloorBar(force) {
+    if (!fl) return;
+    const m = fl.sel >= 0 ? fl.marks[fl.sel] : null;
+    ['#flSelLabel', '#flX', '#flY', '#flDel'].forEach(s => $(s).disabled = !m);
+    $('#flSelLabel').textContent = m ? `Mark ${fl.sel + 1}` : 'Mark';
+    if (force || document.activeElement !== $('#flX')) $('#flX').value = m && Number.isFinite(m.floor[0]) ? m.floor[0] : '';
+    if (force || document.activeElement !== $('#flY')) $('#flY').value = m && Number.isFinite(m.floor[1]) ? m.floor[1] : '';
+    $('#flSave').disabled = !flDirty(); $('#flStat').textContent = flStatusText();
+  }
+  function drawFloor(ctx) {
+    const unit = flUnit(), Hm = flFit(fl.marks, unit);
+    if (Hm) {
+      const done = fl.marks.filter(m => Number.isFinite(m.floor[0]));
+      const xs = done.map(m => m.floor[0]), ys = done.map(m => m.floor[1]);
+      const x0 = Math.floor(Math.min(...xs)) - 3, x1 = Math.ceil(Math.max(...xs)) + 3, y0 = Math.floor(Math.min(...ys)) - 3, y1 = Math.ceil(Math.max(...ys)) + 3;
+      const seg = (a, b, strong) => {      // a floor line from a to b (tiles), drawn in short pieces: perspective bends nothing, but clips
+        ctx.strokeStyle = strong ? 'rgba(255,90,90,.95)' : 'rgba(0,230,255,.55)'; ctx.lineWidth = strong ? 2.5 : 1.2; ctx.beginPath();
+        let pen = false;
+        for (let k = 0; k <= 40; k++) {
+          const X = (a[0] + (b[0] - a[0]) * k / 40) * unit, Y = (a[1] + (b[1] - a[1]) * k / 40) * unit, q = flProj(Hm, X, Y);
+          if (!q || q[0] < -0.5 || q[0] > 1.5 || q[1] < -0.5 || q[1] > 1.5) { pen = false; continue; }
+          const p = toPx(q[0], q[1]); if (pen) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); pen = true;
+        }
+        ctx.stroke();
+      };
+      ctx.save(); const f = frameRect(); ctx.beginPath(); ctx.rect(f.x, f.y, f.w, f.h); ctx.clip();
+      for (let x = x0; x <= x1; x++) seg([x, y0], [x, y1], x === 0);
+      for (let y = y0; y <= y1; y++) seg([x0, y], [x1, y], y === 0);
+      const o = flProj(Hm, 0, 0);
+      if (o) { const p = toPx(o[0], o[1]); ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(p[0] + 6, p[1] - 20, 30, 16); ctx.fillStyle = '#ff6b6b'; ctx.fillText('0,0', p[0] + 9, p[1] - 8); }
+      // the other cameras' people, where the floor plan puts them in this picture
+      if (flLive && $('#flPeople').checked) {
+        ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center';
+        Object.entries(flLive.positions || {}).forEach(([cam, rows]) => {
+          if (cam === detailCam) return;
+          const tag = (CFG.cameras.find(c => c.id === cam) || {name: cam}).name;
+          rows.forEach(r => {
+            const q = flProj(Hm, r.floor[0], r.floor[1]); if (!q) return;
+            const p = toPx(q[0], q[1]); ctx.lineWidth = 3; ctx.strokeStyle = '#ffd400'; ctx.beginPath(); ctx.arc(p[0], p[1], 11, 0, Math.PI * 2); ctx.stroke();
+            const lbl = `${tag} #${r.id}` + (r.store_id != null && r.store_id !== r.id ? ` = #${r.store_id}` : '');
+            const tw = ctx.measureText(lbl).width; ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(p[0] - tw / 2 - 4, p[1] + 13, tw + 8, 15); ctx.fillStyle = '#ffd400'; ctx.fillText(lbl, p[0], p[1] + 24);
+          });
+        });
+        ctx.textAlign = 'start';
+      }
+      ctx.restore();
+    }
+    fl.marks.forEach((m, i) => {
+      const p = toPx(m.img[0], m.img[1]), sel = i === fl.sel, done = Number.isFinite(m.floor[0]) && Number.isFinite(m.floor[1]);
+      ctx.beginPath(); ctx.arc(p[0], p[1], sel ? 9 : 7, 0, Math.PI * 2); ctx.fillStyle = done ? (sel ? '#fff' : '#ff6b6b') : 'rgba(0,0,0,.4)'; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = sel ? '#ff6b6b' : '#fff'; ctx.stroke();
+      const lbl = `${i + 1}` + (done ? `: ${m.floor[0]},${m.floor[1]}` : ': ?');
+      ctx.font = '600 12px system-ui, sans-serif'; const tw = ctx.measureText(lbl).width;
+      ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(p[0] + 10, p[1] - 9, tw + 8, 18); ctx.fillStyle = '#fff'; ctx.fillText(lbl, p[0] + 14, p[1] + 4);
+    });
+  }
+  const flHit = (px, py) => { for (let i = fl.marks.length - 1; i >= 0; i--) { const p = toPx(fl.marks[i].img[0], fl.marks[i].img[1]); if (Math.hypot(p[0] - px, p[1] - py) <= HIT) return i; } return -1; };
+  overlay.addEventListener('pointerdown', e => {
+    if (!fl || e.button > 0) return;
+    const pos = evPos(e), i = flHit(pos[0], pos[1]);
+    let added = false;
+    if (i >= 0) { fl.sel = i; fl.drag = true; }
+    else {
+      if (fl.marks.length >= 40) { toast('At most 40 marks per camera.'); return; }
+      fl.marks.push({img: toNorm(pos[0], pos[1]), floor: [NaN, NaN]}); fl.sel = fl.marks.length - 1; fl.drag = false; added = true;
+    }
+    try { overlay.setPointerCapture(e.pointerId); } catch (x) { /* synthetic pointer */ }
+    e.preventDefault(); renderFloorBar(true); drawOverlay();
+    if (added) { $('#flX').focus(); $('#flX').select(); }        // type X, Enter, Y, Enter
+    else if (document.activeElement && /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) document.activeElement.blur();
+  });
+  overlay.addEventListener('pointermove', e => {
+    if (!fl) return;
+    const pos = evPos(e);
+    if (!fl.drag) { overlay.style.cursor = flHit(pos[0], pos[1]) >= 0 ? 'grab' : 'crosshair'; return; }
+    fl.marks[fl.sel].img = toNorm(pos[0], pos[1]); renderFloorBar(); drawOverlay();
+  });
+  const flEndDrag = e => { if (!fl || !fl.drag) return; fl.drag = false; try { overlay.releasePointerCapture(e.pointerId); } catch (x) { /* not captured */ } };
+  overlay.addEventListener('pointerup', flEndDrag); overlay.addEventListener('pointercancel', flEndDrag);
+  const flRemove = () => { if (!fl || fl.sel < 0) return; fl.marks.splice(fl.sel, 1); fl.sel = -1; renderFloorBar(true); drawOverlay(); };
+  document.addEventListener('keydown', e => {
+    if (!fl || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); flRemove(); }
+    else if (e.key === 'Escape') { fl.sel = -1; renderFloorBar(true); drawOverlay(); }
+  });
+  const flSetPos = k => () => { if (!fl || fl.sel < 0) return; const v = parseFloat($(k === 0 ? '#flX' : '#flY').value); fl.marks[fl.sel].floor[k] = Number.isFinite(v) ? v : NaN; renderFloorBar(); drawOverlay(); };
+  $('#flX').oninput = flSetPos(0); $('#flY').oninput = flSetPos(1);
+  $('#flX').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('#flY').focus(); $('#flY').select(); } };
+  $('#flY').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('#flY').blur(); renderFloorBar(); } };
+  $('#flUnit').oninput = () => { if (fl) { renderFloorBar(); drawOverlay(); } };
+  $('#flPeople').onchange = () => drawOverlay();
+  $('#flDel').onclick = flRemove;
+  $('#flClose').onclick = () => stopFloor(false);
+  $('#btnFloor').onclick = () => fl ? stopFloor(false) : startFloor();
+  $('#flSave').onclick = async () => {
+    if (!fl) return;
+    const open = fl.marks.findIndex(m => !Number.isFinite(m.floor[0]) || !Number.isFinite(m.floor[1]));
+    if (open >= 0) { fl.sel = open; renderFloorBar(); drawOverlay(); toast(`Mark ${open + 1} has no floor position: type its X and Y, or remove it.`); return; }
+    $('#flSave').disabled = true;
+    try {
+      const st = await api(`/api/floor/${encodeURIComponent(detailCam)}`, 'PUT', {points: fl.marks.map(m => ({img: m.img.map(v => +v.toFixed(5)), floor: m.floor})), unit_m: flUnit()});
+      if (!fl) return;
+      fl.all = st; fl.status = (st.cameras || {})[detailCam] || {points: []}; fl.orig = JSON.stringify(fl.marks); fl.origUnit = st.unit_m;
+      const s = fl.status; toast(s.ok ? (s.checked ? `Floor plan saved: ${Math.round(s.error_m * 100)} cm on average.` : 'Floor plan saved. Add a 5th mark to check its accuracy.') : `Saved, not usable yet: ${s.message}.`);
+    } catch (e) { toast('Could not save: ' + e.message); }
+    renderFloorBar(); drawOverlay();
+  };
   function renderOpenAlerts(list, box, withActions) {
     box.innerHTML = '';
     if (!list.length) { text(box, 'div', 'No open alerts', 'hint'); return; }

@@ -199,6 +199,7 @@ class Track:
     judged: bool = False                            # staff or customer has been decided at least once
     first_vote_ts: float = 0.0                      # when the first clothing sample was taken
     pending_entry: float | None = None              # time of an IN crossing that is not booked yet (see _settle_entry)
+    cross_mark: tuple | None = None                 # ("IN" | "OUT", time) of the last line crossing: shown on the box at once
     handed_over: bool = False                       # a newer track already took over this (lost) track's identity
     store_id: int | None = None                     # store fusion: this person's id on the store's overview camera
     store_cam: str = ""                             # ... and that camera's id
@@ -310,6 +311,10 @@ class Analytics:
             # whichever track carries that person out (the tracker often gives them a new number on the way), so that
             # over the day walk-ins and exits balance: a return removes one walk-in and one exit, not just the walk-in
             self.return_credits = 0
+            # every confirmed crossing of the count line the moment it happens, whoever it is and whether or not they
+            # have been identified yet: the raw door count beside the judged walk-ins and exits
+            self.door_in = 0
+            self.door_out = 0
             self.passby = 0
             self.groups_in = 0
             self.unique_ids: set[int] = set(self.tracks.keys())
@@ -527,6 +532,9 @@ class Analytics:
                 "staff_exits": self.staff_exits,
                 "reentries": self.reentries, "reexits": self.reexits,
                 "identifying": sum(1 for t in active if not t.is_staff and not t.judged),
+                "door_in": self.door_in, "door_out": self.door_out,
+                # crossed IN, waiting to be booked as a customer or staff (identification or re-entry check)
+                "pending_in": sum(1 for t in active if t.pending_entry is not None and not t.is_staff),
                 "id_tag": self.id_tag,
                 "dup_customers": sum(1 for t in customers if t.duplicate),      # also counted by the store's overview camera
                 "dup_staff": sum(1 for t in active if t.is_staff and t.duplicate),
@@ -796,6 +804,11 @@ class Analytics:
                                                      # the counter is not walking through the door (their foot point jitters
                                                      # over the line and used to count in and out all day)
         if within and now - t.last_cross_ts >= self.thr.line_cooldown_seconds:
+            t.cross_mark = ("IN" if s > 0 else "OUT", now)
+            if s > 0:
+                self.door_in += 1
+            else:
+                self.door_out += 1
             if s > 0:
                 if t.pending_entry is not None:
                     self._book_entry(t)              # in, out and in again within the hold: book the first one
@@ -812,8 +825,10 @@ class Analytics:
                     self.return_credits -= 1
                     self.reexits += 1                # their way out is counted already: no second EXIT
                     self._event(now, "reexit", t.id, f"Person #{t.id} went out again: exit already counted")
+                    self._mark(t, "OUT: exit already counted", now)
                     self._record_crossing(now, "return_out", t)
                 else:
+                    self._mark(t, "OUT: staff" if t.is_staff else "OUT: exit", now)
                     if t.is_staff:
                         self.staff_exits += 1
                     else:
@@ -841,10 +856,17 @@ class Analytics:
         if known and (t.is_staff or not self._reid_pending(t, now) or now - t.pending_entry >= REVISIT_HOLD_SECONDS):
             self._book_entry(t)
 
+    @staticmethod
+    def _mark(t: Track, text: str, ts: float) -> None:
+        """What the crossing counted as, on the person's box: shown from the moment it is decided (an IN can be booked
+        seconds after the crossing, once the person has been identified)."""
+        t.cross_mark = (text, max(ts, t.last_seen))
+
     def _book_entry(self, t: Track) -> None:
         ts, t.pending_entry = t.pending_entry, None
         if t.is_staff:
             self.staff_entries += 1
+            self._mark(t, "IN: staff", ts)
         else:
             why = self._repeat_entry(t, ts)
             if why:                              # the same person again: no walk-in, no ENTRY for Congruence Eye
@@ -852,11 +874,13 @@ class Analytics:
                 if t.out_booked:                 # and their way out was counted: the next one is not a new exit
                     self.return_credits += 1
                 self._event(ts, "reentry", t.id, f"Person #{t.id} came back in ({why}): same walk-in")
+                self._mark(t, "IN: came back, not a new walk-in", ts)
                 self._record_crossing(ts, "return_in", t)
                 return
             self.entries += 1
             self._minute["entries"] += 1
             t.in_booked, t.in_ts = True, ts
+            self._mark(t, "IN: walk-in", ts)
         self._record_crossing(ts, "in", t)
         self._emit_ce("ENTRY", t, ts)
 
@@ -1003,8 +1027,14 @@ class Analytics:
             return [{"id": t.id, "foot": t.foot, "torso": t.torso, "is_staff": t.is_staff, "reason": t.staff_reason,
                      "manual": t.manual_staff, "vsum": float(sum(t.model_votes)), "vn": len(t.model_votes),
                      "staff_zone": next((z for z in staff_zones if z in t.zones), ""), "zones": list(t.zone_seq),
-                     "visitor_key": t.visitor_key}
+                     "visitor_key": t.visitor_key, "foot_ok": self._foot_on_floor(t)}
                     for t in self.tracks.values() if now - t.last_seen <= LOST_TIMEOUT]
+
+    def _foot_on_floor(self, t: Track) -> bool:
+        """Does the box end at the person's feet? Not when it is cut by the frame bottom: its lowest point is then a
+        knee or a chest, and the floor plan would put the person somewhere else (app/floor.py)."""
+        h = self._frame_wh[1]
+        return not h or t.bbox[3] < (1.0 - CLIPPED_EDGE) * h
 
     def apply_fusion(self, links: dict, now: float, tag: str = "") -> None:
         """links: track id -> {"store_id", "store_cam", "duplicate", "peers": [views of the same person elsewhere]}.

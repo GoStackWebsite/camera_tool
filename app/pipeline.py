@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 from collections import deque
 import time
@@ -17,6 +18,10 @@ from .demographics import Demographics
 from .detector import PersonTracker
 
 log = logging.getLogger("pipeline")
+
+# Face blur is switched off engine-wide for now: streams and snapshots show faces. Each camera keeps its own
+# blur_faces setting, which applies again once this is True (or FACE_BLUR=1 in the environment).
+FACE_BLUR = os.getenv("FACE_BLUR", "0").strip() == "1"
 
 COLORS = {  # BGR
     "visitor": (245, 245, 127),    # cyan: customer, not engaged yet
@@ -35,6 +40,19 @@ ROLE_COLORS = {  # BGR, zone outlines by role
 }
 LINE_COLOR = (255, 220, 0)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+CROSS_MARK_SECONDS = 6.0   # how long "Crossed IN/OUT" stays on a person's box
+
+
+def _pending(stats: dict) -> str:
+    """IN crossings not booked yet because the person is still being identified: shown as "+n" beside In."""
+    n = stats.get("pending_in", 0)
+    return f" +{n}" if n else ""
+
+
+def _back(stats: dict) -> str:
+    """Customers who crossed IN again within the re-entry window: same walk-in, so In does not go up for them."""
+    n = stats.get("reentries", 0)
+    return f", {n} came back" if n else ""
 
 
 def _dur(s: float) -> str:
@@ -171,6 +189,9 @@ def draw_overlay(frame: np.ndarray, tracks: list[Track], cam: CameraConfig, stat
                 lines.append(f"{'Man' if t.gender == 'M' else 'Woman'} - {t.age_band}")
         if t.phone_since:
             lines.append("Using phone")
+        mark = getattr(t, "cross_mark", None)
+        if mark and now - mark[1] <= CROSS_MARK_SECONDS:
+            lines.append(f"Crossed {mark[0]}")      # "Crossed IN" at once, also while still "identifying", then what it counted as
         cv2.rectangle(img, (x1, y1), (x2, y2), color, thick, cv2.LINE_AA)
         _label_block(img, lines, x1, y1 - 2, color, scale * 0.85)
         cv2.circle(img, ((x1 + x2) // 2, y2), thick + 2, color, -1, cv2.LINE_AA)
@@ -185,7 +206,7 @@ def draw_overlay(frame: np.ndarray, tracks: list[Track], cam: CameraConfig, stat
     bar_h = int(36 * scale / 0.75)
     img[:bar_h] = (img[:bar_h] * 0.35).astype(np.uint8)
     text = (f"{cam.name}   Customers {stats.get('occupancy', 0)}   Engaged {engaged_now}   Staff {stats.get('staff', 0)}"
-            f"   In {stats.get('entries', 0)} ({stats.get('groups_in', 0)} groups)   Out {stats.get('exits', 0)}"
+            f"   In {stats.get('entries', 0)}{_pending(stats)} ({stats.get('groups_in', 0)} groups{_back(stats)})   Out {stats.get('exits', 0)}"
             f"   Cam {cam_fps:.0f} fps | AI {infer_fps:.1f} fps   {time.strftime('%H:%M:%S', time.localtime(now))}")
     cv2.putText(img, text, (10, int(bar_h * 0.68)), FONT, scale, (255, 255, 255), 1, cv2.LINE_AA)
     return img
@@ -310,7 +331,7 @@ class Pipeline(threading.Thread):
             stats = self.analytics.snapshot(t0)
             tracks = self.analytics.active_tracks(t0)
             cam = self.analytics.cam
-            out = blur_heads(frame.copy(), tracks) if cam.blur_faces else frame
+            out = blur_heads(frame.copy(), tracks) if FACE_BLUR and cam.blur_faces else frame
             annotated = draw_overlay(out, tracks, cam, stats, self.infer_fps, self.camera.fps, t0,
                                      self.analytics.thr.engage_seconds)
             with self._cond:

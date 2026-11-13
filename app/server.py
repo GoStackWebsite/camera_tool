@@ -18,8 +18,10 @@ from starlette.concurrency import run_in_threadpool
 
 from . import zone_edit
 from .alerts import AlertManager
+from .floor import FloorError
 from .config import (STATIC_DIR, ZONE_ROLES, CameraConfig, ConfigStore, DemographicsConfig, NotifyConfig, ReportConfig,
-                     StaffConfig, StoreConfig, Thresholds, ZoneConfig, _dc, build_rtsp_url, settings, uniform_kind)
+                     StaffConfig, StoreConfig, Thresholds, ZoneConfig, _dc, build_rtsp_url, settings, uniform_kind,
+                     unmask_url)
 from .manager import Manager
 from .notify import Notifier
 from .reports import build_daily_report
@@ -282,8 +284,9 @@ async def update_camera(cam_id: str, body: CameraIn):
     if old.managed:
         # a camera from Congruence Eye: only its local RTSP URL override, fps and face blur can change here
         url_override = None
-        if body.url and "***" not in body.url:
-            url_override = build_rtsp_url(body.url, body.user, body.password)
+        new_url = unmask_url(body.url, old.url_override or old.url)   # masked URL with only the path changed: keep the password
+        if new_url and "***" not in new_url:
+            url_override = build_rtsp_url(new_url, body.user, body.password)
         try:
             cam = await run_in_threadpool(rt.reconciler.set_local, cam_id, url_override, body.target_fps, body.blur_faces)
         except KeyError:
@@ -291,7 +294,8 @@ async def update_camera(cam_id: str, body: CameraIn):
         except ValueError as e:
             raise HTTPException(409, str(e))
         return _camera_out(cam)
-    url = old.url if (not body.url or "***" in body.url) else build_rtsp_url(body.url, body.user, body.password)
+    new_url = unmask_url(body.url, old.url)
+    url = old.url if (not new_url or "***" in new_url) else build_rtsp_url(new_url, body.user, body.password)
     cam = replace(old, name=body.name, url=url, enabled=body.enabled, target_fps=body.target_fps, blur_faces=body.blur_faces)
     await run_in_threadpool(rt.manager.update_camera, cam)
     return _camera_out(cam)
@@ -325,6 +329,41 @@ async def update_layout(cam_id: str, body: LayoutIn):
                   zones=[ZoneConfig(z.name, [[float(p[0]), float(p[1])] for p in z.points], z.role) for z in body.zones])
     await run_in_threadpool(rt.manager.update_camera, cam)
     return _camera_out(cam)
+
+
+class FloorMarkIn(BaseModel):
+    img: tuple[float, float]           # picture point, fractions of the frame
+    floor: tuple[float, float]         # where it is on the floor, in tiles (unit_m metres each)
+
+
+class FloorIn(BaseModel):
+    points: list[FloorMarkIn] = Field(max_length=40)
+    unit_m: float | None = Field(None, gt=0, le=10)
+
+
+@app.get("/api/floor")
+async def floor_status():
+    """Floor plan calibration of every camera (app/floor.py): marks, accuracy, and the floor -> picture mapping the
+    page uses to draw the tile grid over the camera view."""
+    return rt.manager.fusion.floor.status()
+
+
+@app.put("/api/floor/{cam_id}")
+async def floor_save(cam_id: str, body: FloorIn):
+    if rt.config_store.config.camera(cam_id) is None:
+        raise HTTPException(404, "no such camera")
+    try:
+        return await run_in_threadpool(rt.manager.fusion.floor.save_camera, cam_id,
+                                       [{"img": list(p.img), "floor": list(p.floor)} for p in body.points], body.unit_m)
+    except FloorError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+@app.get("/api/floor/live")
+async def floor_live():
+    """Where everybody in view stands on the floor plan, per camera (metres), and the store id they are linked to."""
+    f = rt.manager.fusion
+    return {"positions": f.positions, "primary": f.primary, "active": f.active}
 
 
 class ZoneChangeIn(BaseModel):

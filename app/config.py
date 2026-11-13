@@ -59,6 +59,19 @@ def build_rtsp_url(url: str, user: str, password: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def unmask_url(new_url: str, old_url: str) -> str:
+    """A URL edited from its masked form (user:***@host) keeps the saved password when user and host are unchanged.
+    Returns "" when the mask cannot be resolved, so the caller keeps the old URL."""
+    if not new_url or "***" not in new_url:
+        return new_url
+    n, o = urlsplit(new_url), urlsplit(old_url or "")
+    if n.password != "***" or not o.password or n.username != o.username or n.hostname != o.hostname:
+        return ""
+    # the old user:password exactly as stored (already %-encoded)
+    netloc = f"{o.netloc.rsplit('@', 1)[0]}@{n.hostname}" + (f":{n.port}" if n.port else "")
+    return urlunsplit((n.scheme, netloc, n.path, n.query, n.fragment))
+
+
 def mask_url(url: str) -> str:
     """Hide the password when logging or returning the URL."""
     parts = urlsplit(url)

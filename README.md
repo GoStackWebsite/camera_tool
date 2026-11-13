@@ -44,7 +44,7 @@ Telegram / webhook / e-mail, and a daily Excel report.
 - Licence note: the InsightFace `genderage.onnx` weights are released for non-commercial research use. For a commercial
   deployment replace it with a licensed age/gender model (same 96×96 input, see `app/demographics.py`); YuNet is Apache-2.0
 
-**Privacy**: faces are blurred by default on every camera (detected face box plus head area, coarsely pixelated in every stream and snapshot; can be switched off per camera).
+**Privacy**: face blur is switched off engine-wide for now (`FACE_BLUR` in `app/pipeline.py`, or `FACE_BLUR=1` in the environment to turn it back on). When on, faces are blurred on every camera whose own setting allows it (detected face box plus head area, coarsely pixelated in every stream and snapshot; can be switched off per camera).
 Nothing identifiable is stored, only counts, timings and anonymous track IDs.
 
 ## Setup
@@ -310,6 +310,23 @@ colour, and one person on each side is still not linked when their clothing is c
 
 People only a second camera can see keep that camera's number with a letter (`B-7`), so a bare number always
 means the overview camera's person. `GET /api/stats` lists the live links under `fusion`.
+
+#### Floor plan: linking by where people stand
+
+Shared regions only link people inside the shapes drawn by hand. With a **floor plan** every camera knows where on
+the floor, in metres, each person's feet are, so two cameras link a person anywhere their views overlap: foot
+points within 0.75 m of each other on the floor, held for a second, are one person (the clothing-colour veto
+still applies; two people standing together wait until their colours tell them apart; boxes cut by the frame
+bottom are left to the regions, their lowest point is not the feet).
+
+To calibrate, open a camera, press **Floor plan**, and click tile corners on the floor, typing each one's
+position in tiles from one corner that every camera can see (X across, Y along). Four marks fix the mapping; a
+fifth checks it (the accuracy in cm is shown after saving). The tile grid drawn over the picture must follow the
+real tiles. Set the tile size once (`1 tile = 0.6 m`); all cameras share it. Then do the same on the other
+camera with the same 0,0 corner: the yellow circles are the people the other cameras see, drawn where the floor
+plan puts them, and must sit on the same people's feet. Marks are kept in `data\floor.json` (local, not in
+Congruence Eye); `GET /api/floor` shows each camera's accuracy, `GET /api/floor/live` everyone's floor position.
+Tests: `tools\test_floor.py`.
 
 ## One walk-in per person (2026-10-17)
 

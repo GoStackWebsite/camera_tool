@@ -20,7 +20,7 @@ import cv2
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default=settings.rtsp_url)
+    ap.add_argument("--url", default=settings.default_rtsp_url)
     ap.add_argument("--seconds", type=float, default=5.0)
     args = ap.parse_args()
 
